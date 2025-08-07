@@ -419,3 +419,141 @@ def build_graph():
     g.add_edge("n_decide", END)
 
     return g.compile()
+
+
+# ----------------------
+# Post-processing helpers
+# ----------------------
+def _list_missing_fields(plan: DecisionPlan) -> list:
+    missing = []
+    if not plan.decision:
+        missing.append("decision")
+    if plan.confidence is None:
+        missing.append("confidence")
+    if not plan.entry_timing:
+        missing.append("entry_timing")
+    if not plan.position_size:
+        missing.append("position_size")
+    if plan.dca_plan is None:
+        missing.append("dca_plan")
+    if not plan.risk_controls:
+        missing.append("risk_controls")
+    if not plan.rationale:
+        missing.append("rationale")
+    return missing
+
+
+def _coerce_partial_update(update: dict) -> dict:
+    coerced = {}
+    if "decision" in update and isinstance(update["decision"], str):
+        coerced["decision"] = update["decision"]
+    if "confidence" in update:
+        try:
+            coerced["confidence"] = float(update["confidence"]) if update["confidence"] is not None else None
+        except Exception:
+            pass
+    if "entry_timing" in update and isinstance(update["entry_timing"], str):
+        coerced["entry_timing"] = update["entry_timing"]
+    if "position_size" in update:
+        pos = update["position_size"]
+        if isinstance(pos, str):
+            coerced["position_size"] = pos
+        elif isinstance(pos, (int, float)):
+            coerced["position_size"] = f"~{float(pos):.0f}% of portfolio"
+        elif isinstance(pos, dict):
+            strategy = pos.get("strategy") or pos.get("style") or pos.get("risk")
+            percentage = pos.get("percentage") or pos.get("percent") or pos.get("allocation")
+            try:
+                if strategy is not None and percentage is not None:
+                    coerced["position_size"] = f"{str(strategy)} ~{float(percentage):.0f}% of portfolio"
+            except Exception:
+                pass
+    if "dca_plan" in update:
+        coerced["dca_plan"] = str(update["dca_plan"]) if update["dca_plan"] is not None else None
+    if "risk_controls" in update:
+        rc = update["risk_controls"]
+        if isinstance(rc, dict):
+            coerced["risk_controls"] = {str(k): (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for k, v in rc.items()}
+        elif isinstance(rc, list):
+            out = {}
+            for idx, item in enumerate(rc, start=1):
+                key = None
+                val = item
+                if isinstance(item, dict):
+                    key = item.get("type") or item.get("name") or f"rule_{idx}"
+                    val = item.get("desc") or item.get("description") or item.get("rule") or item
+                out[str(key or f"rule_{idx}")] = json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+            coerced["risk_controls"] = out
+        elif isinstance(rc, str):
+            coerced["risk_controls"] = {"note": rc}
+        elif rc is None:
+            coerced["risk_controls"] = {}
+    if "rationale" in update and isinstance(update["rationale"], str):
+        coerced["rationale"] = update["rationale"]
+    return coerced
+
+
+def fill_missing_decision_fields(
+    run_dir: str,
+    plan: DecisionPlan,
+    ticker: TickerInfo,
+    profile: InputProfile,
+    fundamentals: FundamentalsReport,
+    technical: TechnicalReport,
+    news: NewsReport,
+    sector_macro: SectorMacroReport,
+    alternatives: AlternativesReport,
+    stream: bool = False,
+) -> DecisionPlan:
+    """If the final decision has missing fields, ask the LLM to fill only those fields.
+    Saves a gaps report and any filled decision to the run directory.
+    """
+    state: dict = {"run_dir": run_dir}
+    before_missing = _list_missing_fields(plan)
+    _save_json_if_possible(state, "gaps_report.json", {"missing_before": before_missing})
+    if not before_missing:
+        return plan
+
+    if stream:
+        logger.info("Filling missing fields: %s", ", ".join(before_missing))
+
+    fill_prompt = f"""
+Fill ONLY the following missing fields in the decision JSON: {before_missing}.
+Output JSON with exactly those keys. If you don't know, use null.
+Constraints:
+- position_size MUST be a single string (e.g., 'moderate ~5% of portfolio').
+- risk_controls MUST be an object mapping strings to strings.
+- confidence MUST be between 0 and 1.
+
+Context:
+- Company: {ticker.name} ({ticker.yf_symbol})
+- Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}
+- Technical: {technical.model_dump()}
+- Fundamentals: {fundamentals.model_dump()}
+- News: {news.summary[:1000]}
+- Macro: {sector_macro.summary[:800]}
+- Alternatives: {[c.model_dump() for c in alternatives.candidates]}
+
+Current Decision JSON: {plan.model_dump()}
+"""
+    filled_json = llm.reason(
+        fill_prompt,
+        system="Return ONLY valid JSON with exactly the keys requested.",
+        response_format={"type": "json_object"},
+    )
+    _save_text_if_possible(state, "decision_fill_raw.json", filled_json)
+    try:
+        update = json.loads(filled_json)
+    except Exception:
+        update = {}
+
+    coerced_update = _coerce_partial_update(update)
+    new_data = plan.model_dump()
+    new_data.update(coerced_update)
+    new_plan = DecisionPlan(**new_data)
+    after_missing = _list_missing_fields(new_plan)
+    _save_json_if_possible(state, "gaps_report.json", {"missing_before": before_missing, "missing_after": after_missing})
+    _save_json_if_possible(state, "decision_filled.json", new_plan.model_dump())
+    if stream:
+        logger.info("Missing after fill: %s", ", ".join(after_missing) if after_missing else "none")
+    return new_plan

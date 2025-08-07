@@ -4,7 +4,8 @@ import os
 from datetime import datetime
 from logging_config import setup_logging
 from schemas import InputProfile, AnalysisBundle
-from orchestrator import build_graph
+from orchestrator import build_graph, fill_missing_decision_fields
+from tools.report import generate_pdf_report
 
 
 def run_once(company_name: str, risk_level: str, horizon_years: float, log_level: str | int | None = None, run_dir: str | None = None, stream: bool = False, committee_rounds: int = 0):
@@ -40,6 +41,20 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
         decision=result["decision"],
     )
 
+    # Fill missing decision fields (post-processing)
+    bundle.decision = fill_missing_decision_fields(
+        run_dir=run_dir,
+        plan=bundle.decision,
+        ticker=bundle.input,
+        profile=bundle.profile,
+        fundamentals=bundle.fundamentals,
+        technical=bundle.technical,
+        news=bundle.news,
+        sector_macro=bundle.sector_macro,
+        alternatives=bundle.alternatives,
+        stream=stream,
+    )
+
     # Save final bundle for the run
     try:
         import json
@@ -48,11 +63,12 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
     except Exception as e:
         logger.debug("Failed to write bundle.json: %s", e)
 
-    logger.info("Decision: %s (confidence=%.2f)", bundle.decision.decision, bundle.decision.confidence)
+    conf_str = f"{bundle.decision.confidence:.2f}" if bundle.decision.confidence is not None else "N/A"
+    logger.info("Decision: %s (confidence=%s)", bundle.decision.decision or "N/A", conf_str)
     print("\n=== Final Decision ===")
-    print(f"{bundle.input.name} ({bundle.input.yf_symbol}) -> {bundle.decision.decision} | confidence {bundle.decision.confidence:.2f}")
-    print(f"Entry: {bundle.decision.entry_timing} | Size: {bundle.decision.position_size}")
-    print(f"Rationale: {bundle.decision.rationale}")
+    print(f"{bundle.input.name} ({bundle.input.yf_symbol}) -> {bundle.decision.decision or 'N/A'} | confidence {conf_str}")
+    print(f"Entry: {bundle.decision.entry_timing or 'N/A'} | Size: {bundle.decision.position_size or 'N/A'}")
+    print(f"Rationale: {bundle.decision.rationale or 'N/A'}")
     print("\n=== News Summary ===")
     print(bundle.news.summary)
 
@@ -80,6 +96,11 @@ if __name__ == "__main__":
         default=0,
         help="Number of committee critique/revision rounds",
     )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Generate a final PDF report under the run directory",
+    )
     args = parser.parse_args()
 
     run_once(
@@ -90,3 +111,16 @@ if __name__ == "__main__":
         stream=args.stream,
         committee_rounds=args.rounds,
     )
+    
+    # After run completes, optionally produce a PDF report
+    if args.pdf:
+        try:
+            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in args.company).strip("_")
+            runs_root = os.path.join("runs")
+            candidates = [d for d in os.listdir(runs_root) if d.endswith(safe_name) and os.path.isdir(os.path.join(runs_root, d))]
+            candidates.sort(reverse=True)
+            run_dir = os.path.join(runs_root, candidates[0]) if candidates else runs_root
+            pdf_path = generate_pdf_report(run_dir)
+            logging.getLogger("finbot").info("Saved PDF report: %s", pdf_path)
+        except Exception as e:
+            logging.getLogger("finbot").error("Failed to create PDF report: %s", e)
