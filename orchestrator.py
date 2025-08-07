@@ -5,6 +5,7 @@ import os
 import time
 from typing import List
 from typing_extensions import TypedDict
+from pydantic import ValidationError
 from langgraph.graph import StateGraph, END
 
 from schemas import (
@@ -55,6 +56,43 @@ def _save_json_if_possible(state: dict, filename: str, payload: dict) -> None:
             json.dump(payload, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.debug("Save failed for %s: %s", filename, e)
+
+
+def _save_text_if_possible(state: dict, filename: str, text: str) -> None:
+    run_dir = state.get("run_dir")
+    if not run_dir:
+        return
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        path = os.path.join(run_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception as e:
+        logger.debug("Save text failed for %s: %s", filename, e)
+
+
+# JSON Schema that the LLM must follow for decision outputs
+DECISION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["Buy", "Hold", "Avoid"]},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "entry_timing": {"type": "string"},
+        "position_size": {"type": "string"},
+        "dca_plan": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "risk_controls": {"type": "object", "additionalProperties": {"type": "string"}},
+        "rationale": {"type": "string"}
+    },
+    "required": [
+        "decision",
+        "confidence",
+        "entry_timing",
+        "position_size",
+        "risk_controls",
+        "rationale"
+    ],
+    "additionalProperties": False
+}
 
 
 def node_resolve(state: GraphState) -> GraphState:
@@ -176,7 +214,7 @@ Inputs:
 - News: {news.summary}
 - Sector/Macro: {sector_macro.summary}
 - Alternatives: {[c.model_dump() for c in alternatives.candidates]}
-Return JSON with keys: decision, confidence, entry_timing, position_size, dca_plan, risk_controls, rationale.
+ You MUST output JSON that STRICTLY matches the following JSON Schema: {json.dumps(DECISION_JSON_SCHEMA)}. All fields are required unless marked nullable. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
 """
     logger.debug(
         "Stage decide: building plan for %s risk=%s horizon=%.2f",
@@ -188,38 +226,52 @@ Return JSON with keys: decision, confidence, entry_timing, position_size, dca_pl
     def _truncate(text: str, max_len: int = 6000) -> str:
         return text if len(text) <= max_len else text[:max_len] + "\n...[truncated]"
 
-    json_text = llm.reason(
-        _truncate(prompt, 12000),
-        system=(
-            "Return ONLY valid JSON. Keep it conservative, avoid jargon, respect long-term focus and risk profile."
-        ),
-        response_format={"type": "json_object"},
-    )
-    import json
+    def _request_plan(sys_prompt: str, user_prompt: str) -> str:
+        return llm.reason(
+            _truncate(user_prompt, 12000),
+            system=sys_prompt,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "decision_schema",
+                    "strict": True,
+                    "schema": DECISION_JSON_SCHEMA,
+                },
+            },
+        )
 
-    data = {}
+    sys_msg = (
+        "Return ONLY JSON that strictly matches the provided JSON Schema. Keep it conservative, avoid jargon, and respect the long-term focus and risk profile."
+    )
+
+    json_text = _request_plan(sys_msg, prompt)
+    _save_text_if_possible(state, "decision_raw_try1.json", json_text)
+
+    def _parse_plan(text: str) -> DecisionPlan:
+        data = json.loads(text)
+        return DecisionPlan(**data)
+
+    plan: DecisionPlan
     try:
-        data = json.loads(json_text)
-    except Exception:
-        data = {
-            "decision": "Hold",
-            "confidence": 0.5,
-            "entry_timing": "staged over 4-8 weeks",
-            "position_size": "moderate ~5% of portfolio",
-            "dca_plan": "2-4 tranches",
-            "risk_controls": {"stop": "break of 200DMA or -20%"},
-            "rationale": "Holding pattern due to mixed signals.",
-        }
-
-    plan = DecisionPlan(
-        decision=data.get("decision", "Hold"),
-        confidence=float(data.get("confidence", 0.5)),
-        entry_timing=data.get("entry_timing", "staged over 4-8 weeks"),
-        position_size=data.get("position_size", "moderate ~5% of portfolio"),
-        dca_plan=data.get("dca_plan"),
-        risk_controls=data.get("risk_controls", {}),
-        rationale=data.get("rationale", ""),
-    )
+        plan = _parse_plan(json_text)
+    except (ValidationError, json.JSONDecodeError) as e1:
+        _save_text_if_possible(state, "decision_validation_error_try1.txt", str(e1))
+        logger.info("Decision JSON invalid, requesting correction (attempt 2)")
+        fix_prompt = (
+            "The previous JSON did not match the schema. Here are the errors: "
+            f"{str(e1)}.\n"
+            "Please FIX the JSON to STRICTLY match this JSON Schema (no extra fields, correct types):\n"
+            f"{json.dumps(DECISION_JSON_SCHEMA)}\n"
+            "Return ONLY the corrected JSON."
+        )
+        json_text2 = _request_plan(sys_msg, fix_prompt)
+        _save_text_if_possible(state, "decision_raw_try2.json", json_text2)
+        try:
+            plan = _parse_plan(json_text2)
+        except (ValidationError, json.JSONDecodeError) as e2:
+            _save_text_if_possible(state, "decision_validation_error_try2.txt", str(e2))
+            logger.error("Decision JSON still invalid after correction. Aborting.")
+            raise
 
     # Save initial proposal
     _save_json_if_possible(state, "decision_round0.json", plan.model_dump())
@@ -263,27 +315,19 @@ Context:
 - Macro: {sector_macro.summary[:800]}
 - Alternatives: {[c.model_dump() for c in alternatives.candidates]}
 """
-        revised_json = llm.reason(
-            _truncate(revise_prompt, 12000),
-            system=(
-                "Return ONLY valid JSON. Stay conservative, simple, long-term focused."
-            ),
-            response_format={"type": "json_object"},
-        )
+        revised_json = _request_plan(sys_msg, revise_prompt)
+        _save_text_if_possible(state, f"decision_round{round_idx}_raw.json", revised_json)
         try:
-            revised_data = json.loads(revised_json)
-            plan = DecisionPlan(
-                decision=revised_data.get("decision", plan.decision),
-                confidence=float(revised_data.get("confidence", plan.confidence)),
-                entry_timing=revised_data.get("entry_timing", plan.entry_timing),
-                position_size=revised_data.get("position_size", plan.position_size),
-                dca_plan=revised_data.get("dca_plan", plan.dca_plan),
-                risk_controls=revised_data.get("risk_controls", plan.risk_controls),
-                rationale=revised_data.get("rationale", plan.rationale),
+            plan = _parse_plan(revised_json)
+        except (ValidationError, json.JSONDecodeError) as e:
+            _save_text_if_possible(state, f"decision_round{round_idx}_validation_error.txt", str(e))
+            # Try one correction per round
+            fix_prompt2 = (
+                f"Correction needed. Errors: {str(e)}. Fix JSON to STRICTLY match schema: {json.dumps(DECISION_JSON_SCHEMA)}"
             )
-        except Exception:
-            # Keep previous plan on parse failure
-            pass
+            revised_json2 = _request_plan(sys_msg, fix_prompt2)
+            _save_text_if_possible(state, f"decision_round{round_idx}_raw_retry.json", revised_json2)
+            plan = _parse_plan(revised_json2)
         _save_json_if_possible(state, f"decision_round{round_idx}.json", plan.model_dump())
         if state.get("stream"):
             logger.info("Round %d revised -> %s (conf=%.2f)", round_idx, plan.decision, plan.confidence)
