@@ -88,6 +88,9 @@ ipython_config.py
 # Logs
 logs/
 
+# Run artifacts
+runs/
+
 sample_bot.py
 Features.md
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 from typing import Optional, List
 
 from openai import OpenAI
@@ -9,8 +10,15 @@ from config import OPENAI_API_KEY, REASONING_MODEL, SUMMARY_MODEL, USE_OPENAI_WE
 
 
 class LLM:
-    def __init__(self):
+    def __init__(self, timeout_seconds: Optional[float] = None):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
+        # Default timeout for API calls
+        env_timeout = os.getenv("OPENAI_TIMEOUT_SECONDS")
+        self.timeout_s: Optional[float] = (
+            float(env_timeout) if env_timeout is not None else 20.0
+        )
+        if timeout_seconds is not None:
+            self.timeout_s = timeout_seconds
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
     def summarize(self, prompt: str, system: Optional[str] = None) -> str:
@@ -22,6 +30,7 @@ class LLM:
             model=SUMMARY_MODEL,
             messages=messages,
             temperature=0.3,
+            timeout=self.timeout_s,
         )
         return resp.choices[0].message.content or ""
 
@@ -38,8 +47,8 @@ class LLM:
         resp = self.client.chat.completions.create(
             model=REASONING_MODEL,
             messages=messages,
-            temperature=0.2,
             **kwargs,
+            timeout=self.timeout_s,
         )
         return resp.choices[0].message.content or ""
 
@@ -53,6 +62,7 @@ class LLM:
                 model=REASONING_MODEL,
                 input=[{"role": "user", "content": f"Search the web and summarize latest Indian market news about: {query}. Provide links."}],
                 tools=[{"type": "web_search"}],
+                timeout=self.timeout_s,
             )
             # The structure may vary; try to extract text
             if hasattr(resp, "output") and resp.output:

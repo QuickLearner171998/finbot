@@ -46,6 +46,9 @@ python main.py "TCS" --risk low --horizon 3.0
 
 # Aggressive analysis for HDFC Bank
 python main.py "HDFC Bank" --risk high --horizon 1.5
+
+# Enable verbose debug logs
+python main.py "Reliance" --risk medium --horizon 2.0 --log-level debug
 ```
 
 ### VSCode Debugging
@@ -66,6 +69,18 @@ The bot provides:
 - **Position Size**: Recommended allocation based on risk profile
 - **Rationale**: Detailed explanation of the decision
 - **News Summary**: Recent news sentiment analysis
+
+### Run artifacts
+
+Each execution saves all intermediate and final results under `runs/<timestamp>_<company>/`:
+- `ticker.json`
+- `fundamentals.json`
+- `technical.json`
+- `news.json`
+- `sector_macro.json`
+- `alternatives.json`
+- `decision.json`
+- `bundle.json` (aggregated final result)
 
 ## Architecture
 
