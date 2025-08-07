@@ -40,6 +40,7 @@ def resolve_to_ticker(name: str) -> Optional[str]:
     compact = re.sub(r"\s+", "", simplified or norm).upper()
     trial_symbols.extend(guess_india_symbols(compact))
 
+    logger.debug("Resolver: trials for '%s' -> %s", name, trial_symbols)
     seen = set()
     for sym in trial_symbols:
         if sym in seen:
@@ -48,7 +49,9 @@ def resolve_to_ticker(name: str) -> Optional[str]:
         try:
             hist = yf.Ticker(sym).history(period="1mo")
             if hist is not None and len(hist) > 0:
+                logger.debug("Resolver: selected symbol %s", sym)
                 return sym
         except Exception as e:
             logger.debug("Resolver trial failed for %s: %s", sym, e)
+    logger.debug("Resolver: no valid symbol found for '%s'", name)
     return None

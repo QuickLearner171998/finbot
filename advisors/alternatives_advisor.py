@@ -1,9 +1,12 @@
+import logging
 from typing import List
 from llm import llm
 from schemas import AlternativesReport, AlternativeCandidate
 
 
 def analyze_alternatives(company_name: str) -> AlternativesReport:
+    logger = logging.getLogger("finbot.advisors.alternatives")
+    logger.debug("Alternatives: generating for %s", company_name)
     prompt = (
         "Suggest 3-5 alternative Indian stocks that could be better for long-term investors than the given company. "
         "Prefer same sector and high-quality large/mid caps. Provide a one-line reason for each. Return as bullets.\n"
@@ -17,4 +20,6 @@ def analyze_alternatives(company_name: str) -> AlternativesReport:
             name = parts[0].strip()
             reason = parts[1].strip() if len(parts) > 1 else ""
             candidates.append(AlternativeCandidate(name=name, reason=reason))
-    return AlternativesReport(candidates=candidates[:5])
+    report = AlternativesReport(candidates=candidates[:5])
+    logger.debug("Alternatives: candidates=%d", len(report.candidates))
+    return report

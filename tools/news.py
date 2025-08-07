@@ -29,11 +29,13 @@ def search_news_ddg(query: str, max_results: int = 10) -> List[NewsItem]:
 
 def fetch_news_report(company: str) -> NewsReport:
     # Try OpenAI web search summarization first
+    logger.debug("NewsTool: attempting web_search_summary for %s", company)
     summary = llm.web_search_summary(f"{company} India latest news earnings regulation risks opportunities")
     items: List[NewsItem] = []
 
     if not summary:
         # Fallback to DDG search and LLM summarization of snippets
+        logger.debug("NewsTool: web summary unavailable; falling back to DDG for %s", company)
         items = search_news_ddg(f"{company} India stock news")
         snippets = "\n".join([f"- {n.title}: {n.snippet or ''} ({n.url})" for n in items[:10]])
         prompt = (
@@ -45,5 +47,5 @@ def fetch_news_report(company: str) -> NewsReport:
     if not items:
         # If OpenAI web summary provided links embedded, we still return an empty items list; summary holds the value
         items = []
-
+    logger.debug("NewsTool: items=%d summary_len=%d", len(items), len(summary or ""))
     return NewsReport(items=items, summary=summary or "No recent news found.")
