@@ -88,6 +88,7 @@ DECISION_JSON_SCHEMA = {
         "confidence",
         "entry_timing",
         "position_size",
+        "dca_plan",
         "risk_controls",
         "rationale"
     ],
@@ -214,7 +215,7 @@ Inputs:
 - News: {news.summary}
 - Sector/Macro: {sector_macro.summary}
 - Alternatives: {[c.model_dump() for c in alternatives.candidates]}
- You MUST output JSON that STRICTLY matches the following JSON Schema: {json.dumps(DECISION_JSON_SCHEMA)}. All fields are required unless marked nullable. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
+ You MUST output JSON that STRICTLY matches the following JSON Schema: {json.dumps(DECISION_JSON_SCHEMA)}. If you cannot fill a field, set it to null and keep the key present. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
 """
     logger.debug(
         "Stage decide: building plan for %s risk=%s horizon=%.2f",
@@ -230,18 +231,11 @@ Inputs:
         return llm.reason(
             _truncate(user_prompt, 12000),
             system=sys_prompt,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "decision_schema",
-                    "strict": True,
-                    "schema": DECISION_JSON_SCHEMA,
-                },
-            },
+        response_format={"type": "json_object"},
         )
 
     sys_msg = (
-        "Return ONLY JSON that strictly matches the provided JSON Schema. Keep it conservative, avoid jargon, and respect the long-term focus and risk profile."
+        "Return ONLY valid JSON. Keep it conservative, avoid jargon, and respect the long-term focus and risk profile."
     )
 
     json_text = _request_plan(sys_msg, prompt)
@@ -249,7 +243,61 @@ Inputs:
 
     def _parse_plan(text: str) -> DecisionPlan:
         data = json.loads(text)
-        return DecisionPlan(**data)
+        # Best-effort coercion to keep pipeline flowing; leave None if truly missing
+        decision = data.get("decision") if isinstance(data.get("decision"), str) else None
+        try:
+            confidence = float(data.get("confidence")) if data.get("confidence") is not None else None
+        except Exception:
+            confidence = None
+        entry_timing = data.get("entry_timing") if isinstance(data.get("entry_timing"), str) else None
+
+        pos = data.get("position_size")
+        if isinstance(pos, str):
+            position_size = pos
+        elif isinstance(pos, (int, float)):
+            position_size = f"~{float(pos):.0f}% of portfolio"
+        elif isinstance(pos, dict):
+            strategy = pos.get("strategy") or pos.get("style") or pos.get("risk")
+            percentage = pos.get("percentage") or pos.get("percent") or pos.get("allocation")
+            try:
+                position_size = f"{str(strategy)} ~{float(percentage):.0f}% of portfolio" if (strategy is not None and percentage is not None) else None
+            except Exception:
+                position_size = None
+        else:
+            position_size = None
+
+        dca_plan = data.get("dca_plan")
+        if dca_plan is not None and not isinstance(dca_plan, str):
+            dca_plan = str(dca_plan)
+
+        rc = data.get("risk_controls")
+        if isinstance(rc, dict):
+            risk_controls = {str(k): (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for k, v in rc.items()}
+        elif isinstance(rc, list):
+            risk_controls = {}
+            for idx, item in enumerate(rc, start=1):
+                key = None
+                val = item
+                if isinstance(item, dict):
+                    key = item.get("type") or item.get("name") or f"rule_{idx}"
+                    val = item.get("desc") or item.get("description") or item.get("rule") or item
+                risk_controls[str(key or f"rule_{idx}")] = json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+        elif isinstance(rc, str):
+            risk_controls = {"note": rc}
+        else:
+            risk_controls = {}
+
+        rationale = data.get("rationale") if isinstance(data.get("rationale"), str) else None
+
+        return DecisionPlan(
+            decision=decision,
+            confidence=confidence,
+            entry_timing=entry_timing,
+            position_size=position_size,
+            dca_plan=dca_plan,
+            risk_controls=risk_controls,
+            rationale=rationale,
+        )
 
     plan: DecisionPlan
     try:
@@ -332,7 +380,7 @@ Context:
         if state.get("stream"):
             logger.info("Round %d revised -> %s (conf=%.2f)", round_idx, plan.decision, plan.confidence)
 
-    # Save final decision
+    # Save final decision (allow None fields)
     _save_json_if_possible(state, "decision.json", plan.model_dump())
     logger.debug(
         "Stage decide: decision=%s confidence=%.2f (%.2f ms)",

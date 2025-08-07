@@ -58,13 +58,13 @@ class AlternativesReport(BaseModel):
 
 
 class DecisionPlan(BaseModel):
-    decision: str  # Buy | Hold | Avoid
-    confidence: float
-    entry_timing: str
-    position_size: str  # conservative|moderate|aggressive + % guidance
+    decision: Optional[str] = None  # Buy | Hold | Avoid
+    confidence: Optional[float] = None
+    entry_timing: Optional[str] = None
+    position_size: Optional[str] = None  # conservative|moderate|aggressive + % guidance, or % string
     dca_plan: Optional[str] = None
     risk_controls: Dict[str, str] = {}
-    rationale: str
+    rationale: Optional[str] = None
 
 
 class AnalysisBundle(BaseModel):
