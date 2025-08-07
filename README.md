@@ -61,6 +61,20 @@ python main.py "Reliance" --risk medium --horizon 2.0 --log-level debug
 
 The default debug configuration analyzes Reliance with medium risk over 2 years.
 
+### Streamlit Web Interface
+
+Run the interactive web interface:
+```bash
+streamlit run streamlit_app.py
+```
+
+Features:
+- Multi-company analysis in tabs
+- Interactive risk/horizon controls
+- Price charts with moving averages
+- Download reports (Markdown/HTML/PDF)
+- Real-time streaming progress
+
 ## Output
 
 The bot provides:
@@ -81,6 +95,17 @@ Each execution saves all intermediate and final results under `runs/<timestamp>_
 - `alternatives.json`
 - `decision.json`
 - `bundle.json` (aggregated final result)
+- `report.md`, `report.html`, `report.pdf` (final human-readable reports)
+
+### Generate reports (Markdown/HTML/PDF)
+
+From CLI:
+```bash
+python main.py "Reliance" --risk medium --horizon 2.0 --stream --rounds 1 --pdf
+```
+This will save reports to `runs/<timestamp>_<company>/`.
+
+If you want only the Markdown/HTML without PDF, you can run the app without `--pdf` and call the report functions manually from `tools/report.py`.
 
 ## Architecture
 
@@ -99,6 +124,20 @@ Key configuration options in `config.py`:
 - Logging settings
 
 ## Development
+
+### Running Streamlit
+```bash
+streamlit run streamlit_app.py
+```
+Then open http://localhost:8501 in your browser.
+
+### Report Generation
+Reports are automatically generated when using `--pdf` flag or in Streamlit. They include:
+- **Markdown**: Clean, readable format with proper headings and lists
+- **HTML**: Styled web version with CSS
+- **PDF**: Professional document with proper formatting
+
+The reports show each analysis step, committee discussions (if enabled), and final decision with rationale.
 
 ### Project Structure
 ```

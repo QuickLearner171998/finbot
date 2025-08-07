@@ -8,6 +8,18 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 
+# Optional dependencies for MD/HTML conversion
+try:
+    import markdown as _md
+except Exception:
+    _md = None
+
+try:
+    from weasyprint import HTML, CSS  # type: ignore
+except Exception:
+    HTML = None
+    CSS = None
+
 
 logger = logging.getLogger("finbot.report")
 
@@ -116,4 +128,145 @@ def generate_pdf_report(run_dir: str) -> str:
     logger.info("Saved PDF report: %s", pdf_path)
     return pdf_path
 
+
+def generate_markdown_report(run_dir: str) -> tuple[str, str]:
+    """Generate a markdown report and HTML in run_dir from bundle and critiques.
+
+    Returns (md_path, html_path).
+    """
+    bundle_path = os.path.join(run_dir, "bundle.json")
+    assert os.path.exists(bundle_path), f"bundle.json not found in {run_dir}"
+
+    with open(bundle_path, "r", encoding="utf-8") as f:
+        bundle = json.load(f)
+
+    lines: list[str] = []
+    lines.append(f"# FinBot Report: {bundle['input']['name']} ({bundle['input']['yf_symbol']})")
+    lines.append("")
+    lines.append("## 1) Input & Profile")
+    lines.append(f"- Risk: {bundle['profile'].get('risk_level')}")
+    lines.append(f"- Horizon (years): {bundle['profile'].get('horizon_years')}")
+    lines.append("")
+    lines.append("## 2) Ticker")
+    lines.append(f"- Symbol: {bundle['input'].get('symbol')}")
+    lines.append(f"- Yahoo: {bundle['input'].get('yf_symbol')}")
+    lines.append("")
+    lines.append("## 3) Fundamentals")
+    lines.append(f"- Score: {bundle['fundamentals'].get('score')}")
+    pros = bundle['fundamentals'].get('pros', []) or []
+    cons = bundle['fundamentals'].get('cons', []) or []
+    if pros:
+        lines.append("- Pros:")
+        for p in pros:
+            lines.append(f"  - {p}")
+    if cons:
+        lines.append("- Cons:")
+        for c_ in cons:
+            lines.append(f"  - {c_}")
+    lines.append("")
+    lines.append("## 4) Technical")
+    lines.append(f"- Trend: {bundle['technical'].get('trend')}")
+    lines.append(f"- Metrics: `{bundle['technical'].get('metrics')}`")
+    lines.append("")
+    lines.append("## 5) News Summary")
+    lines.append(bundle['news'].get('summary') or "")
+    lines.append("")
+    lines.append("## 6) Sector/Macro")
+    lines.append(bundle['sector_macro'].get('summary') or "")
+    lines.append("")
+    lines.append("## 7) Alternatives")
+    alts = bundle['alternatives'].get('candidates', []) or []
+    if alts:
+        for cnd in alts:
+            lines.append(f"- {cnd.get('name')}: {cnd.get('reason')}")
+    else:
+        lines.append("- None")
+    lines.append("")
+    lines.append("## 8) Committee Discussion")
+    try:
+        crits = sorted(glob.glob(os.path.join(run_dir, "critique_round*.json")))
+        if not crits:
+            lines.append("- No committee rounds recorded.")
+        else:
+            for cp in crits:
+                with open(cp, "r", encoding="utf-8") as f:
+                    dat = json.load(f)
+                    lines.append(f"### Round {dat.get('round')}")
+                    lines.append("")
+                    lines.append(dat.get('text', '') or '')
+                    lines.append("")
+    except Exception as e:
+        logger.debug("Failed to include committee critiques: %s", e)
+        lines.append("- Committee discussion could not be loaded.")
+    lines.append("")
+    lines.append("## 9) Final Decision")
+    dec = bundle.get('decision', {})
+    lines.append(f"- Decision: {dec.get('decision')}")
+    lines.append(f"- Confidence: {dec.get('confidence')}")
+    lines.append(f"- Entry Timing: {dec.get('entry_timing')}")
+    lines.append(f"- Position Size: {dec.get('position_size')}")
+    lines.append(f"- DCA Plan: {dec.get('dca_plan')}")
+    lines.append(f"- Risk Controls: `{dec.get('risk_controls')}`")
+    lines.append(f"- Rationale: {dec.get('rationale')}")
+
+    md_text = "\n".join(lines)
+    md_path = os.path.join(run_dir, "report.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_text)
+
+    # Build HTML (if markdown lib available)
+    if _md is not None:
+        html_body = _md.markdown(md_text, extensions=["fenced_code", "tables", "toc"])  # type: ignore
+    else:
+        html_body = "<pre>" + md_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre>"
+
+    css = """
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, 'Apple Color Emoji',
+           'Segoe UI Emoji', 'Segoe UI Symbol'; line-height: 1.5; padding: 24px; }
+    h1 { font-size: 24px; margin-top: 0; }
+    h2 { font-size: 18px; margin-top: 20px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    h3 { font-size: 16px; margin-top: 16px; }
+    code, pre { background: #f6f8fa; padding: 2px 4px; border-radius: 4px; }
+    ul { margin-left: 20px; }
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; }
+    """
+    html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>{css}</style>
+  <title>FinBot Report</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+</head>
+<body>
+{html_body}
+</body>
+</html>
+"""
+    html_path = os.path.join(run_dir, "report.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    logger.info("Saved Markdown and HTML report: %s, %s", md_path, html_path)
+    return md_path, html_path
+
+
+def convert_markdown_to_pdf(md_path: str) -> str:
+    """Convert the given MD (or its sibling HTML) to PDF using WeasyPrint if available.
+
+    Falls back to the legacy reportlab PDF if conversion is not possible.
+    """
+    run_dir = os.path.dirname(md_path)
+    html_path = os.path.join(run_dir, "report.html")
+    pdf_path = os.path.join(run_dir, "report.pdf")
+    if HTML is None or CSS is None or not os.path.exists(html_path):
+        logger.info("WeasyPrint not available or HTML missing; falling back to basic PDF generator")
+        return generate_pdf_report(run_dir)
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    HTML(string=html, base_url=run_dir).write_pdf(pdf_path)
+    logger.info("Saved PDF report (from Markdown): %s", pdf_path)
+    return pdf_path
 

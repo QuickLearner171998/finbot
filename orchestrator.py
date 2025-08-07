@@ -378,14 +378,16 @@ Context:
             plan = _parse_plan(revised_json2)
         _save_json_if_possible(state, f"decision_round{round_idx}.json", plan.model_dump())
         if state.get("stream"):
-            logger.info("Round %d revised -> %s (conf=%.2f)", round_idx, plan.decision, plan.confidence)
+            conf_str = f"{plan.confidence:.2f}" if plan.confidence is not None else "N/A"
+            logger.info("Round %d revised -> %s (conf=%s)", round_idx, plan.decision, conf_str)
 
     # Save final decision (allow None fields)
     _save_json_if_possible(state, "decision.json", plan.model_dump())
+    conf_str = f"{plan.confidence:.2f}" if plan.confidence is not None else "N/A"
     logger.debug(
-        "Stage decide: decision=%s confidence=%.2f (%.2f ms)",
+        "Stage decide: decision=%s confidence=%s (%.2f ms)",
         plan.decision,
-        plan.confidence,
+        conf_str,
         (time.perf_counter() - start) * 1000,
     )
     return {"decision": plan}

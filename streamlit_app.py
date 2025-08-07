@@ -1,8 +1,9 @@
 import streamlit as st
 import plotly.graph_objects as go
 from logging_config import setup_logging
-from schemas import InputProfile
-from orchestrator import build_graph
+import schemas as schemas_mod
+from orchestrator import build_graph, fill_missing_decision_fields
+from tools.report import generate_markdown_report, convert_markdown_to_pdf
 from tools.prices import fetch_history
 
 logger = setup_logging()
@@ -24,7 +25,9 @@ if run:
             graph = build_graph()
             state = {
                 "company_name": name,
-                "profile": InputProfile(risk_level=risk, horizon_years=horizon),
+                "profile": schemas_mod.InputProfile(risk_level=risk, horizon_years=horizon),
+                "stream": True,
+                "committee_rounds": 1,
             }
             with st.spinner(f"Analyzing {name}..."):
                 result = graph.invoke(state)
@@ -85,5 +88,34 @@ if run:
             st.subheader("Alternatives")
             for c in result["alternatives"].candidates:
                 st.markdown(f"- **{c.name}**: {c.reason}")
+
+            # Generate and offer report downloads
+            import os, json
+            run_dir = os.path.join("runs", f"streamlit_{name.replace(' ', '_')}")
+            os.makedirs(run_dir, exist_ok=True)
+            # Save a lightweight bundle
+            bundle = {
+                "input": result["ticker"].model_dump(),
+                "profile": result["profile"].model_dump(),
+                "fundamentals": result["fundamentals"].model_dump(),
+                "technical": result["technical"].model_dump(),
+                "news": result["news"].model_dump(),
+                "sector_macro": result["sector_macro"].model_dump(),
+                "alternatives": result["alternatives"].model_dump(),
+                "decision": result["decision"].model_dump(),
+            }
+            with open(os.path.join(run_dir, "bundle.json"), "w", encoding="utf-8") as f:
+                json.dump(bundle, f, indent=2, ensure_ascii=False)
+
+            md_path, html_path = generate_markdown_report(run_dir)
+            pdf_path = convert_markdown_to_pdf(md_path)
+
+            st.subheader("Download Reports")
+            with open(md_path, "r", encoding="utf-8") as f:
+                st.download_button("Download Markdown", data=f.read(), file_name=f"{name}_report.md", mime="text/markdown")
+            with open(html_path, "r", encoding="utf-8") as f:
+                st.download_button("Download HTML", data=f.read(), file_name=f"{name}_report.html", mime="text/html")
+            with open(pdf_path, "rb") as f:
+                st.download_button("Download PDF", data=f.read(), file_name=f"{name}_report.pdf", mime="application/pdf")
 
             st.caption("Not financial advice. For educational use only.")
