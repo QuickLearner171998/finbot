@@ -3,9 +3,10 @@ import logging
 import os
 from datetime import datetime
 from logging_config import setup_logging
-from schemas import InputProfile, AnalysisBundle
+from schemas import InputProfile, AnalysisBundle, ExtendedAnalysisBundle
 from orchestrator import build_graph, fill_missing_decision_fields
 from tools.report import generate_pdf_report
+from tools.backtest import run_backtest
 
 
 def run_once(company_name: str, risk_level: str, horizon_years: float, log_level: str | int | None = None, run_dir: str | None = None, stream: bool = False, committee_rounds: int = 0):
@@ -30,15 +31,18 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
     }
     result = graph.invoke(state)
 
-    bundle = AnalysisBundle(
+    bundle: ExtendedAnalysisBundle = ExtendedAnalysisBundle(
         input=result["ticker"],
         profile=result["profile"],
         fundamentals=result["fundamentals"],
         technical=result["technical"],
         news=result["news"],
         sector_macro=result["sector_macro"],
-        alternatives=result["alternatives"],
         decision=result["decision"],
+        sentiment=result.get("sentiment"),
+        research=result.get("research"),
+        risk=result.get("risk"),
+        approval=result.get("approval"),
     )
 
     # Fill missing decision fields (post-processing)
@@ -51,7 +55,6 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
         technical=bundle.technical,
         news=bundle.news,
         sector_macro=bundle.sector_macro,
-        alternatives=bundle.alternatives,
         stream=stream,
     )
 
@@ -71,6 +74,26 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
     print(f"Rationale: {bundle.decision.rationale or 'N/A'}")
     print("\n=== News Summary ===")
     print(bundle.news.summary)
+    if bundle.sentiment:
+        print("\n=== Sentiment ===")
+        print(f"Score: {bundle.sentiment.score:.2f} | Drivers: ", ", ".join(bundle.sentiment.drivers))
+    if bundle.research:
+        print("\n=== Research Debate ===")
+        print("Bull:")
+        for p in (bundle.research.bull_points or [])[:5]:
+            print("-", p)
+        print("Bear:")
+        for p in (bundle.research.bear_points or [])[:5]:
+            print("-", p)
+        print("Consensus:", bundle.research.consensus)
+    if bundle.risk:
+        print("\n=== Risk Assessment ===")
+        print(f"Level: {bundle.risk.overall_risk} | Veto: {bundle.risk.veto}")
+        for p in (bundle.risk.issues or [])[:5]:
+            print("-", p)
+    if bundle.approval:
+        print("\n=== Fund Manager ===")
+        print(f"Approved: {bundle.approval.approved} | Notes: {bundle.approval.notes}")
 
 
 if __name__ == "__main__":
@@ -101,6 +124,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate a final PDF report under the run directory",
     )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a simple MACD backtest for the resolved symbol and print metrics",
+    )
     args = parser.parse_args()
 
     run_once(
@@ -124,3 +152,25 @@ if __name__ == "__main__":
             logging.getLogger("finbot").info("Saved PDF report: %s", pdf_path)
         except Exception as e:
             logging.getLogger("finbot").error("Failed to create PDF report: %s", e)
+
+    if args.backtest:
+        try:
+            # Read the last run's ticker to get the symbol
+            runs_root = os.path.join("runs")
+            dirs = [d for d in os.listdir(runs_root) if os.path.isdir(os.path.join(runs_root, d))]
+            dirs.sort(reverse=True)
+            latest = os.path.join(runs_root, dirs[0]) if dirs else None
+            symbol = None
+            if latest:
+                import json
+                with open(os.path.join(latest, "ticker.json"), "r", encoding="utf-8") as f:
+                    symbol = json.load(f).get("yf_symbol")
+            symbol = symbol or args.company
+            result = run_backtest(symbol)
+            if result:
+                print("\n=== Backtest (MACD) ===")
+                print(f"{result.symbol}: {result.start} → {result.end} | CR {result.cumulative_return_pct}% | SR {result.sharpe_ratio:.2f} | MDD {result.max_drawdown_pct}% | Trades {result.num_trades}")
+            else:
+                print("Backtest: not available (insufficient data)")
+        except Exception as e:
+            logging.getLogger("finbot").error("Backtest failed: %s", e)

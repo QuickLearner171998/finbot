@@ -53,10 +53,6 @@ class AlternativeCandidate(BaseModel):
     reason: str
 
 
-class AlternativesReport(BaseModel):
-    candidates: List[AlternativeCandidate]
-
-
 class DecisionPlan(BaseModel):
     decision: Optional[str] = None  # Buy | Hold | Avoid
     confidence: Optional[float] = None
@@ -74,5 +70,80 @@ class AnalysisBundle(BaseModel):
     technical: TechnicalReport
     news: NewsReport
     sector_macro: SectorMacroReport
-    alternatives: AlternativesReport
     decision: DecisionPlan
+
+
+# --- Multi-agent extensions inspired by TradingAgents ---
+
+class SentimentReport(BaseModel):
+    score: float = Field(description="Overall sentiment score in [-1.0, 1.0]")
+    drivers: List[str] = []
+    summary: str = ""
+
+
+class ResearchDebateReport(BaseModel):
+    bull_points: List[str] = []
+    bear_points: List[str] = []
+    consensus: str = ""
+
+
+class RiskAssessment(BaseModel):
+    overall_risk: str = Field(description="low|medium|high")
+    issues: List[str] = []
+    constraints: Dict[str, str] = {}
+    veto: bool = False
+
+
+class FundManagerDecision(BaseModel):
+    approved: bool
+    notes: str = ""
+    adjustments: Dict[str, str] = {}
+
+
+# Optional fields in bundle for extended pipeline outputs
+class ExtendedAnalysisBundle(AnalysisBundle):
+    sentiment: Optional[SentimentReport] = None
+    research: Optional[ResearchDebateReport] = None
+    risk: Optional[RiskAssessment] = None
+    approval: Optional[FundManagerDecision] = None
+
+
+# --- Trader agents and ensemble ---
+
+class TraderSignal(BaseModel):
+    risk_profile: str = Field(description="conservative|moderate|aggressive")
+    action: str = Field(description="Buy|Hold|Avoid")
+    confidence: float = 0.0
+    entry_timing: Optional[str] = None
+    position_size: Optional[str] = None
+    rationale: Optional[str] = None
+
+
+class TraderEnsemble(BaseModel):
+    signals: List[TraderSignal]
+    consensus_action: str
+    consensus_confidence: float
+    notes: Optional[str] = None
+
+
+# --- Backtesting ---
+
+class Trade(BaseModel):
+    date: str
+    symbol: str
+    side: str  # buy|sell
+    price: float
+    size: float  # fraction of equity
+
+
+class BacktestResult(BaseModel):
+    symbol: str
+    start: str
+    end: str
+    strategy: str
+    cumulative_return_pct: float
+    annual_return_pct: float
+    sharpe_ratio: float
+    max_drawdown_pct: float
+    num_trades: int
+    trades: List[Trade] = []

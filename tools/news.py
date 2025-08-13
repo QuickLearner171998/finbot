@@ -36,7 +36,7 @@ def fetch_news_report(company: str) -> NewsReport:
     if not summary:
         # Fallback to DDG search and LLM summarization of snippets
         logger.debug("NewsTool: web summary unavailable; falling back to DDG for %s", company)
-        items = search_news_ddg(f"{company} India stock news")
+        items = search_news_ddg(f"{company} latest stock news")
         snippets = "\n".join([f"- {n.title}: {n.snippet or ''} ({n.url})" for n in items[:10]])
         prompt = (
             "Summarize the latest India-relevant news for a non-finance reader. "

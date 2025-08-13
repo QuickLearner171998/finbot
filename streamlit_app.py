@@ -85,9 +85,7 @@ if run:
             st.subheader("Sector / Macro context")
             st.write(result["sector_macro"].summary)
 
-            st.subheader("Alternatives")
-            for c in result["alternatives"].candidates:
-                st.markdown(f"- **{c.name}**: {c.reason}")
+            # Alternatives removed
 
             # Generate and offer report downloads
             import os, json
@@ -101,7 +99,6 @@ if run:
                 "technical": result["technical"].model_dump(),
                 "news": result["news"].model_dump(),
                 "sector_macro": result["sector_macro"].model_dump(),
-                "alternatives": result["alternatives"].model_dump(),
                 "decision": result["decision"].model_dump(),
             }
             with open(os.path.join(run_dir, "bundle.json"), "w", encoding="utf-8") as f:

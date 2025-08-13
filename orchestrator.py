@@ -15,16 +15,22 @@ from schemas import (
     TechnicalReport,
     NewsReport,
     SectorMacroReport,
-    AlternativesReport,
     DecisionPlan,
-    AnalysisBundle,
+    SentimentReport,
+    ResearchDebateReport,
+    RiskAssessment,
+    FundManagerDecision,
 )
 from tools.resolver import resolve_to_ticker
 from advisors.fundamentals_advisor import analyze_fundamentals
 from advisors.technical_advisor import analyze_technical
 from advisors.news_advisor import analyze_news
 from advisors.sector_macro_advisor import analyze_sector_macro
-from advisors.alternatives_advisor import analyze_alternatives
+from advisors.sentiment_advisor import analyze_sentiment
+from advisors.research_advisor import conduct_research_debate
+from advisors.risk_manager import assess_risk
+from advisors.fund_manager import approve_plan
+from advisors.traders import generate_trader_signals, aggregate_trader_signals
 from llm import llm
 
 logger = logging.getLogger("finbot.orchestrator")
@@ -41,8 +47,13 @@ class GraphState(TypedDict, total=False):
     technical: TechnicalReport
     news: NewsReport
     sector_macro: SectorMacroReport
-    alternatives: AlternativesReport
+    sentiment: SentimentReport
+    research: ResearchDebateReport
+    traders: list
+    traders_ensemble: dict
     decision: DecisionPlan
+    risk: RiskAssessment
+    approval: FundManagerDecision
 
 
 def _save_json_if_possible(state: dict, filename: str, payload: dict) -> None:
@@ -161,6 +172,24 @@ def node_news(state: GraphState) -> GraphState:
     return {"news": report}
 
 
+def node_sentiment(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    ticker: TickerInfo = state["ticker"]
+    news: NewsReport = state.get("news", NewsReport(items=[], summary=""))
+    logger.debug("Stage sentiment: analyzing for %s", ticker.name)
+    report = analyze_sentiment(ticker.name, news=news, symbol=ticker.yf_symbol)
+    _save_json_if_possible(state, "sentiment.json", report.model_dump())
+    logger.debug(
+        "Stage sentiment: score=%.3f drivers=%d (%.2f ms)",
+        report.score,
+        len(report.drivers or []),
+        (time.perf_counter() - start) * 1000,
+    )
+    if state.get("stream"):
+        logger.info("Sentiment -> %.2f", report.score)
+    return {"sentiment": report}
+
+
 def node_sector_macro(state: GraphState) -> GraphState:
     start = time.perf_counter()
     ticker: TickerInfo = state["ticker"]
@@ -177,20 +206,58 @@ def node_sector_macro(state: GraphState) -> GraphState:
     return {"sector_macro": report}
 
 
-def node_alternatives(state: GraphState) -> GraphState:
+def node_research(state: GraphState) -> GraphState:
     start = time.perf_counter()
     ticker: TickerInfo = state["ticker"]
-    logger.debug("Stage alternatives: analyzing for %s", ticker.name)
-    report = analyze_alternatives(ticker.name)
-    _save_json_if_possible(state, "alternatives.json", report.model_dump())
+    fundamentals: FundamentalsReport = state["fundamentals"]
+    technical: TechnicalReport = state["technical"]
+    news: NewsReport = state["news"]
+    sector_macro: SectorMacroReport = state["sector_macro"]
+    sentiment: SentimentReport = state.get("sentiment", SentimentReport(score=0.0, drivers=[], summary=""))
+    logger.debug("Stage research: debating for %s", ticker.name)
+    report = conduct_research_debate(
+        ticker.name,
+        fundamentals,
+        technical,
+        news,
+        sector_macro,
+        sentiment_summary=sentiment.summary,
+    )
+    _save_json_if_possible(state, "research.json", report.model_dump())
     logger.debug(
-        "Stage alternatives: candidates=%d (%.2f ms)",
-        len(report.candidates or []),
+        "Stage research: bull=%d bear=%d (%.2f ms)",
+        len(report.bull_points or []),
+        len(report.bear_points or []),
         (time.perf_counter() - start) * 1000,
     )
     if state.get("stream"):
-        logger.info("Alternatives -> %d candidates", len(report.candidates or []))
-    return {"alternatives": report}
+        logger.info("Research -> consensus: %s", (report.consensus or "").split("\n")[0][:80])
+    return {"research": report}
+
+
+def node_traders(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    ticker: TickerInfo = state["ticker"]
+    fundamentals: FundamentalsReport = state["fundamentals"]
+    technical: TechnicalReport = state["technical"]
+    news: NewsReport = state["news"]
+    sector_macro: SectorMacroReport = state["sector_macro"]
+    research: ResearchDebateReport = state.get("research", ResearchDebateReport(bull_points=[], bear_points=[], consensus=""))
+    logger.debug("Stage traders: generating signals for %s", ticker.name)
+    signals = generate_trader_signals(
+        ticker.name,
+        fundamentals,
+        technical,
+        news,
+        sector_macro,
+        research,
+    )
+    ensemble = aggregate_trader_signals(signals)
+    _save_json_if_possible(state, "traders_signals.json", {"signals": [s.model_dump() for s in signals]})
+    _save_json_if_possible(state, "traders_ensemble.json", ensemble.model_dump())
+    if state.get("stream"):
+        logger.info("Traders -> consensus %s (%.2f)", ensemble.consensus_action, ensemble.consensus_confidence)
+    return {"traders": [s.model_dump() for s in signals], "traders_ensemble": ensemble.model_dump()}
 
 
 def node_decide(state: GraphState) -> GraphState:
@@ -201,8 +268,10 @@ def node_decide(state: GraphState) -> GraphState:
     technical: TechnicalReport = state["technical"]
     news: NewsReport = state["news"]
     sector_macro: SectorMacroReport = state["sector_macro"]
-    alternatives: AlternativesReport = state["alternatives"]
     max_rounds: int = int(state.get("committee_rounds", 0) or 0)
+
+    research: ResearchDebateReport = state.get("research", ResearchDebateReport(bull_points=[], bear_points=[], consensus=""))
+    traders_ensemble = state.get("traders_ensemble")
 
     prompt = f"""
 You are a team lead investment advisor for Indian long-term investors. Decide Buy/Hold/Avoid with confidence (0-1), entry timing, simple position size (conservative/medium/aggressive with % guidance), risk controls (stops or time-based), and a clear rationale in simple English.
@@ -214,7 +283,9 @@ Inputs:
 - Technical: {technical.model_dump()}
 - News: {news.summary}
 - Sector/Macro: {sector_macro.summary}
-- Alternatives: {[c.model_dump() for c in alternatives.candidates]}
+ - Research Debate: bull={research.bull_points} bear={research.bear_points} consensus={research.consensus}
+ - Sentiment: {state.get('sentiment').model_dump() if state.get('sentiment') else {}}
+ - Trader Signals: {traders_ensemble}
  You MUST output JSON that STRICTLY matches the following JSON Schema: {json.dumps(DECISION_JSON_SCHEMA)}. If you cannot fill a field, set it to null and keep the key present. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
 """
     logger.debug(
@@ -338,7 +409,6 @@ Inputs:
             f"Key Fundamentals: {fundamentals.model_dump()}\n"
             f"News: {news.summary[:1000]}\n"
             f"Macro: {sector_macro.summary[:800]}\n"
-            f"Alternatives: {[c.model_dump() for c in alternatives.candidates]}\n"
             "Return bullets like '- [Role] Critique: ... | Change: ...'."
         )
         critique_text = llm.summarize(critique_prompt, system="You are chairing a concise, no-jargon investment committee.")
@@ -360,8 +430,7 @@ Context:
 - Technical: {technical.model_dump()}
 - Fundamentals: {fundamentals.model_dump()}
 - News: {news.summary[:1000]}
-- Macro: {sector_macro.summary[:800]}
-- Alternatives: {[c.model_dump() for c in alternatives.candidates]}
+ - Macro: {sector_macro.summary[:800]}
 """
         revised_json = _request_plan(sys_msg, revise_prompt)
         _save_text_if_possible(state, f"decision_round{round_idx}_raw.json", revised_json)
@@ -381,7 +450,7 @@ Context:
             conf_str = f"{plan.confidence:.2f}" if plan.confidence is not None else "N/A"
             logger.info("Round %d revised -> %s (conf=%s)", round_idx, plan.decision, conf_str)
 
-    # Save final decision (allow None fields)
+    # Save final decision before risk/approval (allow None fields)
     _save_json_if_possible(state, "decision.json", plan.model_dump())
     conf_str = f"{plan.confidence:.2f}" if plan.confidence is not None else "N/A"
     logger.debug(
@@ -393,32 +462,104 @@ Context:
     return {"decision": plan}
 
 
+def node_risk(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    ticker: TickerInfo = state["ticker"]
+    plan: DecisionPlan = state["decision"]
+    technical: TechnicalReport = state["technical"]
+    news: NewsReport = state["news"]
+    logger.debug("Stage risk: assessing for %s", ticker.name)
+    report = assess_risk(ticker.name, plan, technical, news)
+    _save_json_if_possible(state, "risk.json", report.model_dump())
+    logger.debug(
+        "Stage risk: level=%s veto=%s issues=%d (%.2f ms)",
+        report.overall_risk,
+        report.veto,
+        len(report.issues or []),
+        (time.perf_counter() - start) * 1000,
+    )
+    if state.get("stream"):
+        logger.info("Risk -> %s%s", report.overall_risk, " (veto)" if report.veto else "")
+    return {"risk": report}
+
+
+def node_approve(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    ticker: TickerInfo = state["ticker"]
+    plan: DecisionPlan = state["decision"]
+    risk: RiskAssessment = state.get("risk", RiskAssessment(overall_risk="medium", issues=[], constraints={}, veto=False))
+    logger.debug("Stage approval: requesting for %s", ticker.name)
+    decision = approve_plan(ticker.name, plan, risk)
+    _save_json_if_possible(state, "approval.json", decision.model_dump())
+
+    # Apply risk veto or fund manager adjustments to the plan
+    updated_plan = plan
+    if risk.veto:
+        new_data = plan.model_dump()
+        new_data.update({"decision": "Avoid"})
+        rc = dict(new_data.get("risk_controls") or {})
+        rc["risk_manager_veto"] = "True"
+        new_data["risk_controls"] = rc
+        updated_plan = DecisionPlan(**new_data)
+
+    if not decision.approved and decision.adjustments:
+        adjustments = _coerce_partial_update(decision.adjustments)
+        new_data = updated_plan.model_dump()
+        new_data.update(adjustments)
+        updated_plan = DecisionPlan(**new_data)
+
+    if updated_plan is not plan:
+        _save_json_if_possible(state, "decision_after_approval.json", updated_plan.model_dump())
+
+    logger.debug(
+        "Stage approval: approved=%s (%.2f ms)",
+        decision.approved,
+        (time.perf_counter() - start) * 1000,
+    )
+    if state.get("stream"):
+        logger.info("Approval -> %s", "approved" if decision.approved else "adjusted/declined")
+    return {"approval": decision, "decision": updated_plan}
+
+
 def build_graph():
     g = StateGraph(GraphState)
     g.add_node("n_resolve", node_resolve)
     g.add_node("n_fundamentals", node_fundamentals)
     g.add_node("n_technical", node_technical)
     g.add_node("n_news", node_news)
+    g.add_node("n_sentiment", node_sentiment)
     g.add_node("n_sector_macro", node_sector_macro)
-    g.add_node("n_alternatives", node_alternatives)
+    g.add_node("n_research", node_research)
+    g.add_node("n_traders", node_traders)
     g.add_node("n_decide", node_decide)
+    g.add_node("n_risk", node_risk)
+    g.add_node("n_approve", node_approve)
 
     g.set_entry_point("n_resolve")
-    # Fan-out
+    # Fan-out from resolve
     g.add_edge("n_resolve", "n_fundamentals")
     g.add_edge("n_resolve", "n_technical")
     g.add_edge("n_resolve", "n_news")
     g.add_edge("n_resolve", "n_sector_macro")
-    g.add_edge("n_resolve", "n_alternatives")
 
-    # Fan-in
-    g.add_edge("n_fundamentals", "n_decide")
-    g.add_edge("n_technical", "n_decide")
-    g.add_edge("n_news", "n_decide")
-    g.add_edge("n_sector_macro", "n_decide")
-    g.add_edge("n_alternatives", "n_decide")
+    # Sentiment depends on news (and implicitly ticker)
+    g.add_edge("n_news", "n_sentiment")
 
-    g.add_edge("n_decide", END)
+    # Research depends on all analyst outputs
+    g.add_edge("n_fundamentals", "n_research")
+    g.add_edge("n_technical", "n_research")
+    g.add_edge("n_news", "n_research")
+    g.add_edge("n_sector_macro", "n_research")
+    g.add_edge("n_sentiment", "n_research")
+
+    # Traders after research; then decision
+    g.add_edge("n_research", "n_traders")
+    g.add_edge("n_traders", "n_decide")
+
+    # Risk review then fund manager approval, then end
+    g.add_edge("n_decide", "n_risk")
+    g.add_edge("n_risk", "n_approve")
+    g.add_edge("n_approve", END)
 
     return g.compile()
 
@@ -504,7 +645,6 @@ def fill_missing_decision_fields(
     technical: TechnicalReport,
     news: NewsReport,
     sector_macro: SectorMacroReport,
-    alternatives: AlternativesReport,
     stream: bool = False,
 ) -> DecisionPlan:
     """If the final decision has missing fields, ask the LLM to fill only those fields.
@@ -532,9 +672,8 @@ Context:
 - Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}
 - Technical: {technical.model_dump()}
 - Fundamentals: {fundamentals.model_dump()}
-- News: {news.summary[:1000]}
-- Macro: {sector_macro.summary[:800]}
-- Alternatives: {[c.model_dump() for c in alternatives.candidates]}
+    - News: {news.summary[:1000]}
+    - Macro: {sector_macro.summary[:800]}
 
 Current Decision JSON: {plan.model_dump()}
 """

@@ -91,11 +91,14 @@ def generate_pdf_report(run_dir: str) -> str:
     y = _add_heading(c, "6) Sector/Macro", y)
     y = _add_paragraph(c, bundle['sector_macro'].get('summary'), y, width, height)
 
-    # 7) Alternatives
-    y = _add_heading(c, "7) Alternatives", y)
-    alts = bundle['alternatives'].get('candidates', []) or []
-    alt_text = "; ".join([f"{cnd.get('name')}: {cnd.get('reason')}" for cnd in alts])
-    y = _add_paragraph(c, alt_text, y, width, height)
+    # 7) Traders (consensus)
+    y = _add_heading(c, "7) Trader Ensemble", y)
+    try:
+        with open(os.path.join(run_dir, "traders_ensemble.json"), "r", encoding="utf-8") as f:
+            ens = json.load(f)
+        y = _add_paragraph(c, f"Consensus: {ens.get('consensus_action')} ({ens.get('consensus_confidence')})", y, width, height)
+    except Exception:
+        y = _add_paragraph(c, "No trader ensemble available.", y, width, height)
 
     # 8) Committee Discussion
     y = _add_heading(c, "8) Committee Discussion", y)
@@ -174,13 +177,13 @@ def generate_markdown_report(run_dir: str) -> tuple[str, str]:
     lines.append("## 6) Sector/Macro")
     lines.append(bundle['sector_macro'].get('summary') or "")
     lines.append("")
-    lines.append("## 7) Alternatives")
-    alts = bundle['alternatives'].get('candidates', []) or []
-    if alts:
-        for cnd in alts:
-            lines.append(f"- {cnd.get('name')}: {cnd.get('reason')}")
-    else:
-        lines.append("- None")
+    lines.append("## 7) Trader Ensemble")
+    try:
+        with open(os.path.join(run_dir, "traders_ensemble.json"), "r", encoding="utf-8") as f:
+            ens = json.load(f)
+        lines.append(f"- Consensus: {ens.get('consensus_action')} ({ens.get('consensus_confidence')})")
+    except Exception:
+        lines.append("- No trader ensemble available.")
     lines.append("")
     lines.append("## 8) Committee Discussion")
     try:
@@ -199,7 +202,7 @@ def generate_markdown_report(run_dir: str) -> tuple[str, str]:
         logger.debug("Failed to include committee critiques: %s", e)
         lines.append("- Committee discussion could not be loaded.")
     lines.append("")
-    lines.append("## 9) Final Decision")
+    lines.append("## 8) Final Decision")
     dec = bundle.get('decision', {})
     lines.append(f"- Decision: {dec.get('decision')}")
     lines.append(f"- Confidence: {dec.get('confidence')}")
