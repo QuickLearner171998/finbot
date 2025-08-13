@@ -6,6 +6,9 @@ from orchestrator import build_graph, fill_missing_decision_fields
 from tools.report import generate_markdown_report, convert_markdown_to_pdf
 from tools.prices import fetch_history
 import time
+import os
+import json
+import threading
 
 logger = setup_logging()
 
@@ -262,8 +265,91 @@ if run:
                 # Update progress bar
                 progress_bar.progress(min(progress, 100))
                 
-            # Run the graph with the callback
-            result = graph.invoke(state, on_update=on_update)
+            # Create a placeholder for the graph execution
+            status_text = st.empty()
+            
+            # Start the graph execution in a separate thread
+            result_container = {"result": None, "current_state": {}}
+            
+            def run_graph():
+                result_container["result"] = graph.invoke(state)
+            
+            thread = threading.Thread(target=run_graph)
+            thread.start()
+            
+            # Poll for updates while the graph is running
+            while thread.is_alive():
+                status_text.text("Analysis in progress...")
+                
+                # Get the latest state from the run directory
+                run_dir = os.path.join("runs", f"streamlit_{name.replace(' ', '_')}")
+                if os.path.exists(run_dir):
+                    # Check for ticker.json
+                    if os.path.exists(os.path.join(run_dir, "ticker.json")) and "ticker" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "ticker.json"), "r") as f:
+                            result_container["current_state"]["ticker"] = schemas_mod.TickerInfo(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for fundamentals.json
+                    if os.path.exists(os.path.join(run_dir, "fundamentals.json")) and "fundamentals" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "fundamentals.json"), "r") as f:
+                            result_container["current_state"]["fundamentals"] = schemas_mod.FundamentalsReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for technical.json
+                    if os.path.exists(os.path.join(run_dir, "technical.json")) and "technical" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "technical.json"), "r") as f:
+                            result_container["current_state"]["technical"] = schemas_mod.TechnicalReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for news.json
+                    if os.path.exists(os.path.join(run_dir, "news.json")) and "news" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "news.json"), "r") as f:
+                            result_container["current_state"]["news"] = schemas_mod.NewsReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for sector_macro.json
+                    if os.path.exists(os.path.join(run_dir, "sector_macro.json")) and "sector_macro" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "sector_macro.json"), "r") as f:
+                            result_container["current_state"]["sector_macro"] = schemas_mod.SectorMacroReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for sentiment.json
+                    if os.path.exists(os.path.join(run_dir, "sentiment.json")) and "sentiment" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "sentiment.json"), "r") as f:
+                            result_container["current_state"]["sentiment"] = schemas_mod.SentimentReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for research.json
+                    if os.path.exists(os.path.join(run_dir, "research.json")) and "research" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "research.json"), "r") as f:
+                            result_container["current_state"]["research"] = schemas_mod.ResearchDebateReport(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for risk.json
+                    if os.path.exists(os.path.join(run_dir, "risk.json")) and "risk" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "risk.json"), "r") as f:
+                            result_container["current_state"]["risk"] = schemas_mod.RiskAssessment(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for traders_signals.json and traders_ensemble.json
+                    if os.path.exists(os.path.join(run_dir, "traders_signals.json")) and os.path.exists(os.path.join(run_dir, "traders_ensemble.json")) and "trader_signals" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "traders_ensemble.json"), "r") as f:
+                            result_container["current_state"]["trader_signals"] = schemas_mod.TraderEnsemble(**json.load(f))
+                            on_update(result_container["current_state"])
+                    
+                    # Check for decision.json
+                    if os.path.exists(os.path.join(run_dir, "decision.json")) and "decision" not in result_container["current_state"]:
+                        with open(os.path.join(run_dir, "decision.json"), "r") as f:
+                            result_container["current_state"]["decision"] = schemas_mod.DecisionPlan(**json.load(f))
+                            on_update(result_container["current_state"])
+                
+                # Sleep for a short time before polling again
+                time.sleep(1)
+            
+            # Thread is done, get the final result
+            status_text.empty()
+            result = result_container["result"]
 
             # Final summary section after all analysis is complete
             st.markdown("---")
@@ -271,7 +357,7 @@ if run:
             
             # Create a dashboard layout with the most important information
             col1, col2 = st.columns([2, 1])
-            
+
             with col1:
                 d = result["decision"]
                 st.markdown(f"### {result['ticker'].name} ({result['ticker'].yf_symbol})")
@@ -302,7 +388,7 @@ if run:
                 st.markdown("**Investment Rationale**")
                 st.write(d.rationale or "No rationale provided")
                 st.markdown("</div>", unsafe_allow_html=True)
-            
+
             with col2:
                 # Price chart in the sidebar
                 st.markdown("**Price Chart (2Y)**")
@@ -320,7 +406,7 @@ if run:
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("No price history available.")
-                    
+
                 # Risk assessment summary if available
                 if "risk" in result:
                     r = result["risk"]
@@ -334,7 +420,6 @@ if run:
             # Alternatives removed
 
             # Generate and offer report downloads
-            import os, json
             run_dir = os.path.join("runs", f"streamlit_{name.replace(' ', '_')}")
             os.makedirs(run_dir, exist_ok=True)
             # Save a lightweight bundle
