@@ -29,9 +29,45 @@ from advisors.sector_macro_advisor import analyze_sector_macro
 from advisors.sentiment_advisor import analyze_sentiment
 from advisors.research_advisor import conduct_research_debate
 from advisors.risk_manager import assess_risk
-from advisors.fund_manager import approve_plan
 from advisors.traders import generate_trader_signals, aggregate_trader_signals
+from advisors.fund_manager import approve_plan
 from llm import llm
+from prompts import (
+    CRITIQUE_PROMPT_TEMPLATE, CRITIQUE_SYSTEM_MESSAGE, 
+    REVISE_PROMPT_TEMPLATE, REVISE_SYSTEM_MESSAGE,
+    FILL_DECISION_PROMPT_TEMPLATE, FILL_DECISION_SYSTEM_MESSAGE,
+    FEEDBACK_DECISION_PROMPT_TEMPLATE, FEEDBACK_DECISION_SYSTEM_MESSAGE
+)
+
+# Add new prompt template for feedback-based decision
+FEEDBACK_DECISION_PROMPT_TEMPLATE = """
+You are the investment team lead. Create a revised investment plan based on the fund manager's feedback.
+
+Fund Manager Feedback: {feedback}
+Requested Adjustments: {adjustments}
+
+Output JSON with these exact fields:
+- decision: string (must be exactly one of: 'Buy', 'Hold', 'Avoid')
+- confidence: number between 0 and 1
+- entry_timing: string (e.g., 'Immediate', 'Wait for pullback')
+- position_size: string (e.g., '10% of portfolio', 'small position')
+- dca_plan: string (dollar-cost averaging strategy)
+- risk_controls: object with string keys and string values (risk management rules)
+- rationale: string (brief explanation)
+
+Context:
+- Company: {company_name} ({symbol})
+- Profile: risk={risk_level}, horizon_years={horizon_years}
+- Technical: {technical}
+- Fundamentals: {fundamentals}
+- News: {news_summary}
+- Macro: {macro_summary}
+- Trader Consensus: {consensus_action} (confidence: {consensus_confidence})
+
+Return ONLY valid JSON with the exact fields specified above.
+"""
+
+FEEDBACK_DECISION_SYSTEM_MESSAGE = "You are a team lead incorporating feedback to create an improved investment decision. Return ONLY valid JSON with the exact fields specified in the prompt."
 
 logger = logging.getLogger("finbot.orchestrator")
 
@@ -42,6 +78,7 @@ class GraphState(TypedDict, total=False):
     run_dir: str
     stream: bool
     committee_rounds: int
+    approval_attempts: int  # Track number of approval iterations
     ticker: TickerInfo
     fundamentals: FundamentalsReport
     technical: TechnicalReport
@@ -301,7 +338,7 @@ Inputs:
     def _request_plan(sys_prompt: str, user_prompt: str) -> str:
         return llm.reason(
             _truncate(user_prompt, 12000),
-            system=sys_prompt,
+            system=REVISE_SYSTEM_MESSAGE if sys_prompt == sys_msg else sys_prompt,
             response_format={"type": "json_object"}
         )
 
@@ -399,19 +436,18 @@ Inputs:
     for round_idx in range(1, max_rounds + 1):
         if state.get("stream"):
             logger.info("Committee round %d: critique", round_idx)
-        critique_prompt = (
-            "Assume a round-table of 4 senior advisors (Fundamentals Lead, Technical Lead, Macro Lead, Risk Manager). "
-            "Given the current plan and inputs, list concise critiques and suggested tweaks. Be practical and conservative.\n\n"
-            f"Company: {ticker.name} ({ticker.yf_symbol})\n"
-            f"Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}\n"
-            f"Current Plan: {plan.model_dump()}\n"
-            f"Key Technical: {technical.model_dump()}\n"
-            f"Key Fundamentals: {fundamentals.model_dump()}\n"
-            f"News: {news.summary[:1000]}\n"
-            f"Macro: {sector_macro.summary[:800]}\n"
-            "Return bullets like '- [Role] Critique: ... | Change: ...'."
+        critique_prompt = CRITIQUE_PROMPT_TEMPLATE.format(
+            company_name=ticker.name,
+            symbol=ticker.yf_symbol,
+            risk_level=profile.risk_level,
+            horizon_years=profile.horizon_years,
+            plan=plan.model_dump(),
+            technical=technical.model_dump(),
+            fundamentals=fundamentals.model_dump(),
+            news_summary=news.summary[:1000],
+            macro_summary=sector_macro.summary[:800]
         )
-        critique_text = llm.summarize(critique_prompt, system="You are chairing a concise, no-jargon investment committee.")
+        critique_text = llm.summarize(critique_prompt, system=CRITIQUE_SYSTEM_MESSAGE)
         _save_json_if_possible(state, f"critique_round{round_idx}.json", {"round": round_idx, "text": critique_text})
         if state.get("stream") and critique_text:
             first_line = (critique_text.split("\n")[0])[:200]
@@ -419,19 +455,17 @@ Inputs:
 
         if state.get("stream"):
             logger.info("Committee round %d: revise", round_idx)
-        revise_prompt = f"""
-You are the team lead. Revise the plan considering the committee's critiques below. Keep output JSON keys: decision, confidence, entry_timing, position_size, dca_plan, risk_controls, rationale. Keep explanations short and grounded.
-
-Critiques:\n{critique_text}
-
-Context:
-- Company: {ticker.name} ({ticker.yf_symbol})
-- Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}
-- Technical: {technical.model_dump()}
-- Fundamentals: {fundamentals.model_dump()}
-- News: {news.summary[:1000]}
- - Macro: {sector_macro.summary[:800]}
-"""
+        revise_prompt = REVISE_PROMPT_TEMPLATE.format(
+            critique_text=critique_text,
+            company_name=ticker.name,
+            symbol=ticker.yf_symbol,
+            risk_level=profile.risk_level,
+            horizon_years=profile.horizon_years,
+            technical=technical.model_dump(),
+            fundamentals=fundamentals.model_dump(),
+            news_summary=news.summary[:1000],
+            macro_summary=sector_macro.summary[:800]
+        )
         revised_json = _request_plan(sys_msg, revise_prompt)
         _save_text_if_possible(state, f"decision_round{round_idx}_raw.json", revised_json)
         try:
@@ -488,10 +522,20 @@ def node_approve(state: GraphState) -> GraphState:
     ticker: TickerInfo = state["ticker"]
     plan: DecisionPlan = state["decision"]
     risk: RiskAssessment = state.get("risk", RiskAssessment(overall_risk="medium", issues=[], constraints={}, veto=False))
-    logger.debug("Stage approval: requesting for %s", ticker.name)
+    fundamentals: FundamentalsReport = state["fundamentals"]
+    technical: TechnicalReport = state["technical"]
+    news: NewsReport = state["news"]
+    sector_macro: SectorMacroReport = state["sector_macro"]
+    research: ResearchDebateReport = state.get("research")
+    
+    # Track approval iterations
+    approval_attempts = state.get("approval_attempts", 0)
+    max_attempts = 2  # Maximum number of approval iterations
+    
+    logger.debug(f"Stage approval: requesting for {ticker.name} (attempt {approval_attempts + 1}/{max_attempts + 1})")
     decision = approve_plan(ticker.name, plan, risk)
-    _save_json_if_possible(state, "approval.json", decision.model_dump())
-
+    _save_json_if_possible(state, f"approval_{approval_attempts}.json", decision.model_dump())
+    
     # Apply risk veto or fund manager adjustments to the plan
     updated_plan = plan
     if risk.veto:
@@ -509,16 +553,118 @@ def node_approve(state: GraphState) -> GraphState:
         updated_plan = DecisionPlan(**new_data)
 
     if updated_plan is not plan:
-        _save_json_if_possible(state, "decision_after_approval.json", updated_plan.model_dump())
+        _save_json_if_possible(state, f"decision_after_approval_{approval_attempts}.json", updated_plan.model_dump())
 
+    # If not approved and we haven't reached max attempts, recompute the decision
+    if not decision.approved and approval_attempts < max_attempts:
+        logger.info(f"Plan not approved (attempt {approval_attempts + 1}/{max_attempts + 1}). Incorporating feedback and recomputing...")
+        
+        # Incorporate feedback from fund manager into a new decision
+        feedback = decision.notes
+        adjustments_text = ", ".join([f"{k}: {v}" for k, v in decision.adjustments.items()])
+        
+        # Recompute traders signals with feedback
+        if research:
+            logger.debug("Recomputing traders signals with approval feedback")
+            traders_signals = generate_trader_signals(ticker.name, fundamentals, technical, news, 
+                                                    sector_macro, research)
+            ensemble = aggregate_trader_signals(traders_signals)
+            
+            # Recompute decision with feedback
+            profile = state["profile"]
+            new_plan = node_decide_with_feedback(
+                ticker, profile, fundamentals, technical, news, sector_macro, 
+                traders_signals, ensemble, feedback, adjustments_text
+            )
+            
+            # Reassess risk with new plan
+            new_risk = assess_risk(ticker.name, new_plan, technical, news)
+            
+            # Increment attempts counter
+            return {
+                "decision": new_plan,
+                "risk": new_risk,
+                "approval_attempts": approval_attempts + 1
+            }
+    
     logger.debug(
-        "Stage approval: approved=%s (%.2f ms)",
+        "Stage approval: approved=%s (attempt %d/%d) (%.2f ms)",
         decision.approved,
+        approval_attempts + 1,
+        max_attempts + 1,
         (time.perf_counter() - start) * 1000,
     )
     if state.get("stream"):
-        logger.info("Approval -> %s", "approved" if decision.approved else "adjusted/declined")
+        logger.info("Approval -> %s (attempt %d/%d)", 
+                   "approved" if decision.approved else "adjusted/declined",
+                   approval_attempts + 1, max_attempts + 1)
+    
     return {"approval": decision, "decision": updated_plan}
+
+
+def node_decide_with_feedback(
+    ticker: TickerInfo,
+    profile: InputProfile,
+    fundamentals: FundamentalsReport,
+    technical: TechnicalReport,
+    news: NewsReport,
+    sector_macro: SectorMacroReport,
+    traders_signals: List,
+    ensemble: dict,
+    feedback: str,
+    adjustments: str
+) -> DecisionPlan:
+    """Generate a decision plan incorporating feedback from the fund manager."""
+    start = time.perf_counter()
+    logger.debug("Stage decide with feedback: generating for %s", ticker.name)
+    
+    # Create a decision prompt that incorporates the fund manager's feedback
+    prompt = FEEDBACK_DECISION_PROMPT_TEMPLATE.format(
+        feedback=feedback,
+        adjustments=adjustments,
+        company_name=ticker.name,
+        symbol=ticker.yf_symbol,
+        risk_level=profile.risk_level,
+        horizon_years=profile.horizon_years,
+        technical=technical.model_dump(),
+        fundamentals=fundamentals.model_dump(),
+        news_summary=news.summary[:1000],
+        macro_summary=sector_macro.summary[:800],
+        consensus_action=ensemble.get("consensus_action", "Hold"),
+        consensus_confidence=ensemble.get("consensus_confidence", 0.5)
+    )
+    
+    # Request a new plan with feedback incorporated
+    json_text = llm.reason(
+        _truncate(prompt, 12000),
+        system=FEEDBACK_DECISION_SYSTEM_MESSAGE,
+        response_format={"type": "json_object"}
+    )
+    
+    try:
+        # Parse the JSON response
+        plan = _parse_plan(json_text)
+    except (ValidationError, json.JSONDecodeError) as e:
+        logger.error(f"Feedback decision JSON invalid: {e}")
+        # Fallback to a default plan if parsing fails
+        plan = DecisionPlan(
+            decision="Hold",
+            confidence=0.5,
+            entry_timing="After further analysis",
+            position_size="Moderate position",
+            dca_plan="Standard DCA approach",
+            risk_controls={"stop_loss": "Standard"},
+            rationale="Generated as fallback due to parsing error in feedback-based decision."
+        )
+    
+    logger.debug(
+        "Stage decide with feedback: decision=%s confidence=%s (%.2f ms)",
+        plan.decision,
+        plan.confidence,
+        (time.perf_counter() - start) * 1000,
+    )
+    
+    return plan
 
 
 def build_graph():
@@ -556,10 +702,20 @@ def build_graph():
     g.add_edge("n_research", "n_traders")
     g.add_edge("n_traders", "n_decide")
 
-    # Risk review then fund manager approval, then end
+    # Risk review then fund manager approval
     g.add_edge("n_decide", "n_risk")
     g.add_edge("n_risk", "n_approve")
-    g.add_edge("n_approve", END)
+    
+    # Conditional routing based on approval result
+    def approval_router(state: GraphState):
+        # If not approved and we haven't reached max attempts, loop back to risk assessment
+        if state.get("approval_attempts", 0) > 0 and state.get("approval_attempts", 0) < 2 and not state.get("approval", {}).get("approved", False):
+            return "n_risk"
+        # Otherwise proceed to end
+        return END
+    
+    # Add conditional routing from approve node
+    g.add_conditional_edges("n_approve", approval_router, {"n_risk": "n_risk", END: END})
 
     return g.compile()
 
@@ -659,27 +815,21 @@ def fill_missing_decision_fields(
     if stream:
         logger.info("Filling missing fields: %s", ", ".join(before_missing))
 
-    fill_prompt = f"""
-Fill ONLY the following missing fields in the decision JSON: {before_missing}.
-Output JSON with exactly those keys. If you don't know, use null.
-Constraints:
-- position_size MUST be a single string (e.g., 'moderate ~5% of portfolio').
-- risk_controls MUST be an object mapping strings to strings.
-- confidence MUST be between 0 and 1.
-
-Context:
-- Company: {ticker.name} ({ticker.yf_symbol})
-- Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}
-- Technical: {technical.model_dump()}
-- Fundamentals: {fundamentals.model_dump()}
-    - News: {news.summary[:1000]}
-    - Macro: {sector_macro.summary[:800]}
-
-Current Decision JSON: {plan.model_dump()}
-"""
+    fill_prompt = FILL_DECISION_PROMPT_TEMPLATE.format(
+        missing_fields=before_missing,
+        company_name=ticker.name,
+        symbol=ticker.yf_symbol,
+        risk_level=profile.risk_level,
+        horizon_years=profile.horizon_years,
+        technical=technical.model_dump(),
+        fundamentals=fundamentals.model_dump(),
+        news_summary=news.summary[:1000],
+        macro_summary=sector_macro.summary[:800],
+        current_plan=plan.model_dump()
+    )
     filled_json = llm.reason(
         fill_prompt,
-        system="Return ONLY valid JSON with exactly the keys requested.",
+        system=FILL_DECISION_SYSTEM_MESSAGE,
         response_format={"type": "json_object"},
     )
     _save_text_if_possible(state, "decision_fill_raw.json", filled_json)

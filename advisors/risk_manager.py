@@ -3,22 +3,22 @@ from typing import Optional
 
 from llm import llm
 from schemas import RiskAssessment, DecisionPlan, TechnicalReport, NewsReport
+from prompts import RISK_PROMPT_TEMPLATE, RISK_SYSTEM_MESSAGE
 
 
 logger = logging.getLogger("finbot.advisors.risk")
 
 
 def assess_risk(company_name: str, plan: DecisionPlan, technical: TechnicalReport, news: Optional[NewsReport] = None) -> RiskAssessment:
-    prompt = (
-        "You are a risk manager. Review the plan and identify risks and constraints. "
-        "Output JSON with keys: overall_risk (low|medium|high), issues (list), constraints (object of policy->note), veto (bool).\n"
-        f"Company: {company_name}\n"
-        f"Plan: {plan.model_dump()}\n"
-        f"Technical: {technical.model_dump()}\n"
-        f"News: {(news.summary if news else '')[:800]}"
+    news_summary = (news.summary if news else '')[:800]
+    prompt = RISK_PROMPT_TEMPLATE.format(
+        company_name=company_name,
+        plan=plan.model_dump(),
+        technical=technical.model_dump(),
+        news_summary=news_summary
     )
     try:
-        text = llm.reason(prompt, system="Return ONLY JSON with keys: overall_risk, issues, constraints, veto.", response_format={"type": "json_object"})
+        text = llm.reason(prompt, system=RISK_SYSTEM_MESSAGE, response_format={"type": "json_object"})
         import json
         data = json.loads(text)
         overall = str(data.get("overall_risk") or "medium")

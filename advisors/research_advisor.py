@@ -9,6 +9,7 @@ from schemas import (
     NewsReport,
     SectorMacroReport,
 )
+from prompts import RESEARCH_PROMPT_TEMPLATE, RESEARCH_SYSTEM_MESSAGE
 
 
 logger = logging.getLogger("finbot.advisors.research")
@@ -22,17 +23,16 @@ def conduct_research_debate(
     sector_macro: SectorMacroReport,
     sentiment_summary: Optional[str] = None,
 ) -> ResearchDebateReport:
-    prompt = (
-        "Two researchers debate. Output JSON with: bull_points (list), bear_points (list), consensus (short string).\n"
-        f"Company: {company_name}\n"
-        f"Fundamentals: {fundamentals.model_dump()}\n"
-        f"Technical: {technical.model_dump()}\n"
-        f"News summary: {news.summary[:1000]}\n"
-        f"Macro: {sector_macro.summary[:800]}\n"
-        f"Sentiment (optional): {sentiment_summary or ''}"
+    prompt = RESEARCH_PROMPT_TEMPLATE.format(
+        company_name=company_name,
+        fundamentals=fundamentals.model_dump(),
+        technical=technical.model_dump(),
+        news_summary=news.summary[:1000],
+        macro_summary=sector_macro.summary[:800],
+        sentiment_summary=sentiment_summary or ''
     )
     try:
-        text = llm.reason(prompt, system="Return ONLY JSON with keys: bull_points, bear_points, consensus.", response_format={"type": "json_object"})
+        text = llm.reason(prompt, system=RESEARCH_SYSTEM_MESSAGE, response_format={"type": "json_object"})
         import json
         data = json.loads(text)
         bull = [str(x) for x in (data.get("bull_points") or [])]

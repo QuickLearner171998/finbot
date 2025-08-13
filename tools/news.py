@@ -4,6 +4,7 @@ from duckduckgo_search import DDGS
 
 from llm import llm
 from schemas import NewsItem, NewsReport
+from prompts import NEWS_SUMMARY_PROMPT_TEMPLATE, NEWS_SUMMARY_SYSTEM_MESSAGE
 
 logger = logging.getLogger("finbot.tools.news")
 
@@ -38,11 +39,10 @@ def fetch_news_report(company: str) -> NewsReport:
         logger.debug("NewsTool: web summary unavailable; falling back to DDG for %s", company)
         items = search_news_ddg(f"{company} latest stock news")
         snippets = "\n".join([f"- {n.title}: {n.snippet or ''} ({n.url})" for n in items[:10]])
-        prompt = (
-            "Summarize the latest India-relevant news for a non-finance reader. "
-            "Be concise, list key themes, risks, and opportunities.\n" + snippets
+        prompt = NEWS_SUMMARY_PROMPT_TEMPLATE.format(
+            snippets=snippets
         )
-        summary = llm.summarize(prompt, system="You are a senior financial editor summarizing news in simple English. Provide a concise summary.")
+        summary = llm.summarize(prompt, system=NEWS_SUMMARY_SYSTEM_MESSAGE)
 
     if not items:
         # If OpenAI web summary provided links embedded, we still return an empty items list; summary holds the value

@@ -11,6 +11,7 @@ from schemas import (
     ResearchDebateReport,
 )
 from llm import llm
+from prompts import TRADER_PROMPT_TEMPLATE, TRADER_SYSTEM_MESSAGE
 
 
 logger = logging.getLogger("finbot.advisors.traders")
@@ -20,15 +21,16 @@ RISK_PROFILES = ["conservative", "moderate", "aggressive"]
 
 
 def _trader_prompt(profile: str, company: str, fundamentals: FundamentalsReport, technical: TechnicalReport, news: NewsReport, macro: SectorMacroReport, research: ResearchDebateReport) -> str:
-    return (
-        f"Act as a {profile} trader. Output JSON with keys: action (Buy|Hold|Avoid), confidence (0-1), entry_timing, position_size, rationale.\n"
-        f"Company: {company}\n"
-        f"Fundamentals: {fundamentals.model_dump()}\n"
-        f"Technical: {technical.model_dump()}\n"
-        f"News: {news.summary[:800]}\n"
-        f"Macro: {macro.summary[:600]}\n"
-        f"Research: bull={research.bull_points} bear={research.bear_points} consensus={research.consensus}\n"
-        "Return ONLY JSON."
+    return TRADER_PROMPT_TEMPLATE.format(
+        profile=profile,
+        company=company,
+        fundamentals=fundamentals.model_dump(),
+        technical=technical.model_dump(),
+        news_summary=news.summary[:800],
+        macro_summary=macro.summary[:600],
+        bull_points=research.bull_points,
+        bear_points=research.bear_points,
+        consensus=research.consensus
     )
 
 
@@ -38,16 +40,35 @@ def generate_trader_signals(company: str, fundamentals: FundamentalsReport, tech
         try:
             text = llm.reason(
                 _trader_prompt(profile, company, fundamentals, technical, news, macro, research),
-                system="Return ONLY JSON with keys: action, confidence, entry_timing, position_size, rationale.",
+                system=TRADER_SYSTEM_MESSAGE,
                 response_format={"type": "json_object"},
             )
             import json
             data = json.loads(text)
             action = str(data.get("action") or "Hold")
-            conf = float(data.get("confidence") or 0.0)
-            entry = data.get("entry_timing")
-            size = data.get("position_size")
-            rationale = data.get("rationale")
+            
+            # Handle confidence value more gracefully
+            conf_val = data.get("confidence") or 0.0
+            try:
+                conf = float(conf_val)
+            except (ValueError, TypeError):
+                # If it's a string like "0.8" or something else, try to convert or default
+                try:
+                    conf = float(str(conf_val).replace('%', '').strip()) / 100 if '%' in str(conf_val) else float(str(conf_val))
+                except (ValueError, TypeError):
+                    conf = 0.5  # Default to medium confidence
+            
+            entry = str(data.get("entry_timing") or "")
+            
+            # Handle position_size more gracefully
+            size_val = data.get("position_size")
+            if isinstance(size_val, (int, float)):
+                # Convert numeric values to string format
+                size = f"{size_val}% of portfolio"
+            else:
+                size = str(size_val or "")
+                
+            rationale = str(data.get("rationale") or "")
             signals.append(TraderSignal(risk_profile=profile, action=action, confidence=conf, entry_timing=entry, position_size=size, rationale=rationale))
         except Exception as e:
             logger.debug("Trader %s parse failed: %s", profile, e)

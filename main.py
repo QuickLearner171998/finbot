@@ -28,6 +28,7 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
         "run_dir": run_dir,
         "stream": stream,
         "committee_rounds": committee_rounds,
+        "approval_attempts": 0,  # Initialize approval attempts counter
     }
     result = graph.invoke(state)
 

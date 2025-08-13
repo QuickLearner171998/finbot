@@ -21,6 +21,9 @@ class FundamentalsReport(BaseModel):
     cons: List[str] = []
     score: float = 0.0
     notes: Optional[str] = None
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class TechnicalReport(BaseModel):
@@ -55,12 +58,15 @@ class AlternativeCandidate(BaseModel):
 
 class DecisionPlan(BaseModel):
     decision: Optional[str] = None  # Buy | Hold | Avoid
-    confidence: Optional[float] = None
+    confidence: Optional[float | str] = None  # Allow both float and string values
     entry_timing: Optional[str] = None
-    position_size: Optional[str] = None  # conservative|moderate|aggressive + % guidance, or % string
+    position_size: Optional[str | float | dict] = None  # Allow string, float, or dict values
     dca_plan: Optional[str] = None
     risk_controls: Dict[str, str] = {}
     rationale: Optional[str] = None
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class AnalysisBundle(BaseModel):
@@ -79,12 +85,18 @@ class SentimentReport(BaseModel):
     score: float = Field(description="Overall sentiment score in [-1.0, 1.0]")
     drivers: List[str] = []
     summary: str = ""
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class ResearchDebateReport(BaseModel):
     bull_points: List[str] = []
     bear_points: List[str] = []
     consensus: str = ""
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class RiskAssessment(BaseModel):
@@ -92,6 +104,9 @@ class RiskAssessment(BaseModel):
     issues: List[str] = []
     constraints: Dict[str, str] = {}
     veto: bool = False
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class FundManagerDecision(BaseModel):
@@ -115,8 +130,11 @@ class TraderSignal(BaseModel):
     action: str = Field(description="Buy|Hold|Avoid")
     confidence: float = 0.0
     entry_timing: Optional[str] = None
-    position_size: Optional[str] = None
+    position_size: Optional[str | float] = None  # Allow both string and float values
     rationale: Optional[str] = None
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class TraderEnsemble(BaseModel):

@@ -2,20 +2,18 @@ import logging
 from typing import List
 from llm import llm
 from schemas import AlternativeCandidate
+from prompts import ALTERNATIVES_PROMPT_TEMPLATE, ALTERNATIVES_SYSTEM_MESSAGE
 
 
 def analyze_alternatives(company_name: str) -> List[AlternativeCandidate]:
     logger = logging.getLogger("finbot.advisors.alternatives")
     logger.debug("Alternatives: generating for %s", company_name)
-    prompt = (
-        "Suggest 3-5 alternative Indian stocks that could be better for long-term investors than the given company. "
-        "Prefer same sector and high-quality large/mid caps. Provide a one-line reason for each. "
-        "Return as JSON array with objects containing 'name' and 'reason' fields.\n"
-        f"Company: {company_name}"
+    prompt = ALTERNATIVES_PROMPT_TEMPLATE.format(
+        company_name=company_name
     )
     text = llm.summarize(
         prompt, 
-        system="You are a conservative long-term stock picker in India. Return ONLY JSON array with objects containing 'name' and 'reason' fields.", 
+        system=ALTERNATIVES_SYSTEM_MESSAGE, 
         response_format={"type": "json_object"}
     )
     
