@@ -157,6 +157,38 @@ Return ONLY valid JSON with the exact fields specified above.
 
 FEEDBACK_DECISION_SYSTEM_MESSAGE = "You are a team lead incorporating feedback to create an improved investment decision. Return ONLY valid JSON with the exact fields specified in the prompt."
 
+# --- Decision Node Prompts ---
+DECISION_PROMPT_TEMPLATE = """
+You are a team lead investment advisor for Indian long-term investors. Decide Buy/Hold/Avoid with confidence (0-1), entry timing, simple position size (conservative/medium/aggressive with % guidance), risk controls (stops or time-based), and a clear rationale in simple English.
+
+Inputs:
+- Company: {company_name} ({symbol})
+- Profile: risk={risk_level}, horizon_years={horizon_years}
+- Fundamentals: {fundamentals}
+- Technical: {technical}
+- News: {news_summary}
+- Sector/Macro: {macro_summary}
+- Research Debate: bull={bull_points} bear={bear_points} consensus={consensus}
+- Sentiment: {sentiment}
+- Trader Signals: {traders_ensemble}
+
+You MUST output JSON that STRICTLY matches the following JSON Schema: {json_schema}. If you cannot fill a field, set it to null and keep the key present. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
+"""
+
+DECISION_SYSTEM_MESSAGE = "Return ONLY valid JSON. Keep it conservative, avoid jargon, and respect the long-term focus and risk profile."
+
+# --- JSON Fix Prompts ---
+JSON_FIX_PROMPT_TEMPLATE = """
+The previous JSON did not match the schema. Here are the errors: {errors}.
+
+Please FIX the JSON to STRICTLY match this JSON Schema (no extra fields, correct types):
+{json_schema}
+
+Please provide ONLY the corrected JSON.
+"""
+
+JSON_FIX_SYSTEM_MESSAGE = "You are a JSON validator. Fix the JSON to match the exact schema provided. Return ONLY the corrected JSON."
+
 FILL_DECISION_PROMPT_TEMPLATE = """
 Fill ONLY the following missing fields in the decision JSON: {missing_fields}.
 Output JSON with exactly those keys. If you don't know, use null.

@@ -99,7 +99,7 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run long-term investment analysis for Indian stocks.")
-    parser.add_argument("company", help="Company name, e.g., Reliance, TCS, HDFC Bank")
+    parser.add_argument("company", help="Company name(s), comma-separated, e.g., 'Reliance, TCS, HDFC Bank'")
     parser.add_argument("--risk", default="medium", choices=["low", "medium", "high"], help="Risk level")
     parser.add_argument("--horizon", type=float, default=2.0, help="Holding horizon in years")
     parser.add_argument(
@@ -131,47 +131,62 @@ if __name__ == "__main__":
         help="Run a simple MACD backtest for the resolved symbol and print metrics",
     )
     args = parser.parse_args()
-
-    run_once(
-        args.company,
-        args.risk,
-        args.horizon,
-        args.log_level,
-        stream=args.stream,
-        committee_rounds=args.rounds,
-    )
     
-    # After run completes, optionally produce a PDF report
+    # Split company names and process each one
+    company_names = [name.strip() for name in args.company.split(',') if name.strip()]
+    run_dirs = []
+    
+    for company_name in company_names:
+        print(f"\n{'='*50}\nAnalyzing {company_name}\n{'='*50}")
+        
+        # Create a unique run directory for each company
+        safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in company_name).strip("_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join("runs", f"{timestamp}_{safe_name}")
+        run_dirs.append(run_dir)
+        
+        # Run analysis for this company
+        run_once(
+            company_name,
+            args.risk,
+            args.horizon,
+            args.log_level,
+            run_dir=run_dir,
+            stream=args.stream,
+            committee_rounds=args.rounds,
+        )
+    
+    # After all runs complete, optionally produce PDF reports
     if args.pdf:
-        try:
-            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in args.company).strip("_")
-            runs_root = os.path.join("runs")
-            candidates = [d for d in os.listdir(runs_root) if d.endswith(safe_name) and os.path.isdir(os.path.join(runs_root, d))]
-            candidates.sort(reverse=True)
-            run_dir = os.path.join(runs_root, candidates[0]) if candidates else runs_root
-            pdf_path = generate_pdf_report(run_dir)
-            logging.getLogger("finbot").info("Saved PDF report: %s", pdf_path)
-        except Exception as e:
-            logging.getLogger("finbot").error("Failed to create PDF report: %s", e)
+        for run_dir in run_dirs:
+            try:
+                pdf_path = generate_pdf_report(run_dir)
+                logging.getLogger("finbot").info("Saved PDF report: %s", pdf_path)
+            except Exception as e:
+                logging.getLogger("finbot").error("Failed to create PDF report for %s: %s", run_dir, e)
 
+    # Run backtest for each company if requested
     if args.backtest:
-        try:
-            # Read the last run's ticker to get the symbol
-            runs_root = os.path.join("runs")
-            dirs = [d for d in os.listdir(runs_root) if os.path.isdir(os.path.join(runs_root, d))]
-            dirs.sort(reverse=True)
-            latest = os.path.join(runs_root, dirs[0]) if dirs else None
-            symbol = None
-            if latest:
-                import json
-                with open(os.path.join(latest, "ticker.json"), "r", encoding="utf-8") as f:
-                    symbol = json.load(f).get("yf_symbol")
-            symbol = symbol or args.company
-            result = run_backtest(symbol)
-            if result:
-                print("\n=== Backtest (MACD) ===")
-                print(f"{result.symbol}: {result.start} → {result.end} | CR {result.cumulative_return_pct}% | SR {result.sharpe_ratio:.2f} | MDD {result.max_drawdown_pct}% | Trades {result.num_trades}")
-            else:
-                print("Backtest: not available (insufficient data)")
-        except Exception as e:
-            logging.getLogger("finbot").error("Backtest failed: %s", e)
+        for run_dir in run_dirs:
+            try:
+                # Read the ticker.json from the run directory
+                symbol = None
+                try:
+                    import json
+                    with open(os.path.join(run_dir, "ticker.json"), "r", encoding="utf-8") as f:
+                        ticker_data = json.load(f)
+                        symbol = ticker_data.get("yf_symbol")
+                        company_name = ticker_data.get("name")
+                except Exception:
+                    # If ticker.json doesn't exist or is invalid, use directory name as fallback
+                    company_name = os.path.basename(run_dir).split('_', 1)[1] if '_' in os.path.basename(run_dir) else os.path.basename(run_dir)
+                
+                if symbol:
+                    result = run_backtest(symbol)
+                    if result:
+                        print(f"\n=== Backtest for {company_name} (MACD) ===")
+                        print(f"{result.symbol}: {result.start} → {result.end} | CR {result.cumulative_return_pct}% | SR {result.sharpe_ratio:.2f} | MDD {result.max_drawdown_pct}% | Trades {result.num_trades}")
+                    else:
+                        print(f"\nBacktest for {company_name}: not available (insufficient data)")
+            except Exception as e:
+                logging.getLogger("finbot").error("Backtest failed for %s: %s", run_dir, e)

@@ -20,6 +20,7 @@ from schemas import (
     ResearchDebateReport,
     RiskAssessment,
     FundManagerDecision,
+    TraderEnsemble,
 )
 from tools.resolver import resolve_to_ticker
 from advisors.fundamentals_advisor import analyze_fundamentals
@@ -36,38 +37,14 @@ from prompts import (
     CRITIQUE_PROMPT_TEMPLATE, CRITIQUE_SYSTEM_MESSAGE, 
     REVISE_PROMPT_TEMPLATE, REVISE_SYSTEM_MESSAGE,
     FILL_DECISION_PROMPT_TEMPLATE, FILL_DECISION_SYSTEM_MESSAGE,
-    FEEDBACK_DECISION_PROMPT_TEMPLATE, FEEDBACK_DECISION_SYSTEM_MESSAGE
+    FEEDBACK_DECISION_PROMPT_TEMPLATE, FEEDBACK_DECISION_SYSTEM_MESSAGE,
+    DECISION_PROMPT_TEMPLATE, DECISION_SYSTEM_MESSAGE,
+    JSON_FIX_PROMPT_TEMPLATE, JSON_FIX_SYSTEM_MESSAGE
 )
 
-# Add new prompt template for feedback-based decision
-FEEDBACK_DECISION_PROMPT_TEMPLATE = """
-You are the investment team lead. Create a revised investment plan based on the fund manager's feedback.
+# FEEDBACK_DECISION_PROMPT_TEMPLATE is imported from prompts.py
 
-Fund Manager Feedback: {feedback}
-Requested Adjustments: {adjustments}
-
-Output JSON with these exact fields:
-- decision: string (must be exactly one of: 'Buy', 'Hold', 'Avoid')
-- confidence: number between 0 and 1
-- entry_timing: string (e.g., 'Immediate', 'Wait for pullback')
-- position_size: string (e.g., '10% of portfolio', 'small position')
-- dca_plan: string (dollar-cost averaging strategy)
-- risk_controls: object with string keys and string values (risk management rules)
-- rationale: string (brief explanation)
-
-Context:
-- Company: {company_name} ({symbol})
-- Profile: risk={risk_level}, horizon_years={horizon_years}
-- Technical: {technical}
-- Fundamentals: {fundamentals}
-- News: {news_summary}
-- Macro: {macro_summary}
-- Trader Consensus: {consensus_action} (confidence: {consensus_confidence})
-
-Return ONLY valid JSON with the exact fields specified above.
-"""
-
-FEEDBACK_DECISION_SYSTEM_MESSAGE = "You are a team lead incorporating feedback to create an improved investment decision. Return ONLY valid JSON with the exact fields specified in the prompt."
+# FEEDBACK_DECISION_SYSTEM_MESSAGE is imported from prompts.py
 
 logger = logging.getLogger("finbot.orchestrator")
 
@@ -87,7 +64,7 @@ class GraphState(TypedDict, total=False):
     sentiment: SentimentReport
     research: ResearchDebateReport
     traders: list
-    traders_ensemble: dict
+    traders_ensemble: TraderEnsemble
     decision: DecisionPlan
     risk: RiskAssessment
     approval: FundManagerDecision
@@ -294,7 +271,7 @@ def node_traders(state: GraphState) -> GraphState:
     _save_json_if_possible(state, "traders_ensemble.json", ensemble.model_dump())
     if state.get("stream"):
         logger.info("Traders -> consensus %s (%.2f)", ensemble.consensus_action, ensemble.consensus_confidence)
-    return {"traders": [s.model_dump() for s in signals], "traders_ensemble": ensemble.model_dump()}
+    return {"traders": [s.model_dump() for s in signals], "traders_ensemble": ensemble}
 
 
 def node_decide(state: GraphState) -> GraphState:
@@ -310,21 +287,22 @@ def node_decide(state: GraphState) -> GraphState:
     research: ResearchDebateReport = state.get("research", ResearchDebateReport(bull_points=[], bear_points=[], consensus=""))
     traders_ensemble = state.get("traders_ensemble")
 
-    prompt = f"""
-You are a team lead investment advisor for Indian long-term investors. Decide Buy/Hold/Avoid with confidence (0-1), entry timing, simple position size (conservative/medium/aggressive with % guidance), risk controls (stops or time-based), and a clear rationale in simple English.
-
-Inputs:
-- Company: {ticker.name} ({ticker.yf_symbol})
-- Profile: risk={profile.risk_level}, horizon_years={profile.horizon_years}
-- Fundamentals: {fundamentals.model_dump()}
-- Technical: {technical.model_dump()}
-- News: {news.summary}
-- Sector/Macro: {sector_macro.summary}
- - Research Debate: bull={research.bull_points} bear={research.bear_points} consensus={research.consensus}
- - Sentiment: {state.get('sentiment').model_dump() if state.get('sentiment') else {}}
- - Trader Signals: {traders_ensemble}
- You MUST output JSON that STRICTLY matches the following JSON Schema: {json.dumps(DECISION_JSON_SCHEMA)}. If you cannot fill a field, set it to null and keep the key present. Ensure risk_controls values are strings (not numbers or lists). No extra properties.
-"""
+    prompt = DECISION_PROMPT_TEMPLATE.format(
+        company_name=ticker.name,
+        symbol=ticker.yf_symbol,
+        risk_level=profile.risk_level,
+        horizon_years=profile.horizon_years,
+        fundamentals=fundamentals.model_dump(),
+        technical=technical.model_dump(),
+        news_summary=news.summary,
+        macro_summary=sector_macro.summary,
+        bull_points=research.bull_points,
+        bear_points=research.bear_points,
+        consensus=research.consensus,
+        sentiment=state.get('sentiment').model_dump() if state.get('sentiment') else {},
+        traders_ensemble=traders_ensemble.model_dump() if traders_ensemble else {},
+        json_schema=json.dumps(DECISION_JSON_SCHEMA)
+    )
     logger.debug(
         "Stage decide: building plan for %s risk=%s horizon=%.2f",
         ticker.yf_symbol,
@@ -338,13 +316,11 @@ Inputs:
     def _request_plan(sys_prompt: str, user_prompt: str) -> str:
         return llm.reason(
             _truncate(user_prompt, 12000),
-            system=REVISE_SYSTEM_MESSAGE if sys_prompt == sys_msg else sys_prompt,
+            system=sys_prompt,
             response_format={"type": "json_object"}
         )
 
-    sys_msg = (
-        "Return ONLY valid JSON. Keep it conservative, avoid jargon, and respect the long-term focus and risk profile."
-    )
+    sys_msg = DECISION_SYSTEM_MESSAGE
 
     json_text = _request_plan(sys_msg, prompt)
     _save_text_if_possible(state, "decision_raw_try1.json", json_text)
@@ -413,12 +389,9 @@ Inputs:
     except (ValidationError, json.JSONDecodeError) as e1:
         _save_text_if_possible(state, "decision_validation_error_try1.txt", str(e1))
         logger.info("Decision JSON invalid, requesting correction (attempt 2)")
-        fix_prompt = (
-            "The previous JSON did not match the schema. Here are the errors: "
-            f"{str(e1)}.\n"
-            "Please FIX the JSON to STRICTLY match this JSON Schema (no extra fields, correct types):\n"
-            f"{json.dumps(DECISION_JSON_SCHEMA)}\n"
-            "Return ONLY the corrected JSON."
+        fix_prompt = JSON_FIX_PROMPT_TEMPLATE.format(
+            errors=str(e1),
+            json_schema=json.dumps(DECISION_JSON_SCHEMA)
         )
         json_text2 = _request_plan(sys_msg, fix_prompt)
         _save_text_if_possible(state, "decision_raw_try2.json", json_text2)
@@ -473,8 +446,9 @@ Inputs:
         except (ValidationError, json.JSONDecodeError) as e:
             _save_text_if_possible(state, f"decision_round{round_idx}_validation_error.txt", str(e))
             # Try one correction per round
-            fix_prompt2 = (
-                f"Correction needed. Errors: {str(e)}. Fix JSON to STRICTLY match schema: {json.dumps(DECISION_JSON_SCHEMA)}"
+            fix_prompt2 = JSON_FIX_PROMPT_TEMPLATE.format(
+                errors=str(e),
+                json_schema=json.dumps(DECISION_JSON_SCHEMA)
             )
             revised_json2 = _request_plan(sys_msg, fix_prompt2)
             _save_text_if_possible(state, f"decision_round{round_idx}_raw_retry.json", revised_json2)
@@ -577,13 +551,10 @@ def node_approve(state: GraphState) -> GraphState:
                 traders_signals, ensemble, feedback, adjustments_text
             )
             
-            # Reassess risk with new plan
-            new_risk = assess_risk(ticker.name, new_plan, technical, news)
-            
-            # Increment attempts counter
+            # Increment attempts counter. Do NOT write 'risk' here to avoid multiple writes in one step.
             return {
                 "decision": new_plan,
-                "risk": new_risk,
+                "approval": decision,
                 "approval_attempts": approval_attempts + 1
             }
     
@@ -610,13 +581,76 @@ def node_decide_with_feedback(
     news: NewsReport,
     sector_macro: SectorMacroReport,
     traders_signals: List,
-    ensemble: dict,
+    ensemble: TraderEnsemble,
     feedback: str,
     adjustments: str
 ) -> DecisionPlan:
     """Generate a decision plan incorporating feedback from the fund manager."""
     start = time.perf_counter()
     logger.debug("Stage decide with feedback: generating for %s", ticker.name)
+    
+    # Helper function to truncate long text
+    def _truncate(text: str, max_len: int = 6000) -> str:
+        return text if len(text) <= max_len else text[:max_len] + "\n...[truncated]"
+        
+    # Helper function to parse the JSON response into a DecisionPlan
+    def _parse_plan(text: str) -> DecisionPlan:
+        data = json.loads(text)
+        # Best-effort coercion to keep pipeline flowing; leave None if truly missing
+        decision = data.get("decision") if isinstance(data.get("decision"), str) else None
+        try:
+            confidence = float(data.get("confidence")) if data.get("confidence") is not None else None
+        except Exception:
+            confidence = None
+        entry_timing = data.get("entry_timing") if isinstance(data.get("entry_timing"), str) else None
+
+        pos = data.get("position_size")
+        if isinstance(pos, str):
+            position_size = pos
+        elif isinstance(pos, (int, float)):
+            position_size = f"~{float(pos):.0f}% of portfolio"
+        elif isinstance(pos, dict):
+            strategy = pos.get("strategy") or pos.get("style") or pos.get("risk")
+            percentage = pos.get("percentage") or pos.get("percent") or pos.get("allocation")
+            try:
+                position_size = f"{str(strategy)} ~{float(percentage):.0f}% of portfolio" if (strategy is not None and percentage is not None) else None
+            except Exception:
+                position_size = None
+        else:
+            position_size = None
+
+        dca_plan = data.get("dca_plan")
+        if dca_plan is not None and not isinstance(dca_plan, str):
+            dca_plan = str(dca_plan)
+
+        rc = data.get("risk_controls")
+        if isinstance(rc, dict):
+            risk_controls = {str(k): (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for k, v in rc.items()}
+        elif isinstance(rc, list):
+            risk_controls = {}
+            for idx, item in enumerate(rc, start=1):
+                key = None
+                val = item
+                if isinstance(item, dict):
+                    key = item.get("type") or item.get("name") or f"rule_{idx}"
+                    val = item.get("desc") or item.get("description") or item.get("rule") or item
+                risk_controls[str(key or f"rule_{idx}")] = json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+        elif isinstance(rc, str):
+            risk_controls = {"note": rc}
+        else:
+            risk_controls = {}
+
+        rationale = data.get("rationale") if isinstance(data.get("rationale"), str) else None
+
+        return DecisionPlan(
+            decision=decision,
+            confidence=confidence,
+            entry_timing=entry_timing,
+            position_size=position_size,
+            dca_plan=dca_plan,
+            risk_controls=risk_controls,
+            rationale=rationale,
+        )
     
     # Create a decision prompt that incorporates the fund manager's feedback
     prompt = FEEDBACK_DECISION_PROMPT_TEMPLATE.format(
@@ -630,22 +664,39 @@ def node_decide_with_feedback(
         fundamentals=fundamentals.model_dump(),
         news_summary=news.summary[:1000],
         macro_summary=sector_macro.summary[:800],
-        consensus_action=ensemble.get("consensus_action", "Hold"),
-        consensus_confidence=ensemble.get("consensus_confidence", 0.5)
+        consensus_action=ensemble.consensus_action,
+        consensus_confidence=ensemble.consensus_confidence
     )
     
     # Request a new plan with feedback incorporated
-    json_text = llm.reason(
-        _truncate(prompt, 12000),
-        system=FEEDBACK_DECISION_SYSTEM_MESSAGE,
-        response_format={"type": "json_object"}
-    )
+    try:
+        json_text = llm.reason(
+            _truncate(prompt, 12000),
+            system=FEEDBACK_DECISION_SYSTEM_MESSAGE,
+            response_format={"type": "json_object"}
+        )
+    except Exception as e:
+        logger.error(f"LLM API error in feedback decision: {e}")
+        # Return a fallback plan if the LLM call fails
+        return DecisionPlan(
+            decision="Hold",
+            confidence=0.5,
+            entry_timing="After further analysis",
+            position_size="Moderate position",
+            dca_plan="Standard DCA approach",
+            risk_controls={"stop_loss": "Standard"},
+            rationale=f"Generated as fallback due to LLM API error: {str(e)}"
+        )
     
     try:
         # Parse the JSON response
         plan = _parse_plan(json_text)
     except (ValidationError, json.JSONDecodeError) as e:
         logger.error(f"Feedback decision JSON invalid: {e}")
+        # Save the error and invalid JSON for debugging
+        with open(f"error_feedback_decision_{int(time.time())}.txt", "w") as f:
+            f.write(f"Error: {str(e)}\n\nInvalid JSON:\n{json_text}")
+        
         # Fallback to a default plan if parsing fails
         plan = DecisionPlan(
             decision="Hold",
