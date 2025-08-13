@@ -21,16 +21,20 @@ class LLM:
             self.timeout_s = timeout_seconds
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
-    def summarize(self, prompt: str, system: Optional[str] = None) -> str:
+    def summarize(self, prompt: str, system: Optional[str] = None, response_format: Optional[dict] = None) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        kwargs = {}
+        if response_format:
+            kwargs["response_format"] = response_format
         resp = self.client.chat.completions.create(
             model=SUMMARY_MODEL,
             messages=messages,
             temperature=0.3,
             timeout=self.timeout_s,
+            **kwargs
         )
         return resp.choices[0].message.content or ""
 

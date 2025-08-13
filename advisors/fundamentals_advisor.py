@@ -19,7 +19,7 @@ def analyze_fundamentals(symbol: str, company_name: str) -> FundamentalsReport:
         "Return a JSON with three keys: 'score' (a number between 0-100), 'pros' (a list of strings), "
         "and 'cons' (a list of strings). The score should reflect your assessment of the company's long-term prospects."
     )
-    text = llm.summarize(prompt, system="You are an equity analyst for India markets.")
+    text = llm.summarize(prompt, system="You are an equity analyst for India markets. Return ONLY JSON with keys: score, pros, cons.", response_format={"type": "json_object"})
     logger.debug("Fundamentals: received summary length=%d", len(text or ""))
     # Parse the JSON response from LLM
     import json

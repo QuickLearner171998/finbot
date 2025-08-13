@@ -42,7 +42,7 @@ def fetch_news_report(company: str) -> NewsReport:
             "Summarize the latest India-relevant news for a non-finance reader. "
             "Be concise, list key themes, risks, and opportunities.\n" + snippets
         )
-        summary = llm.summarize(prompt, system="You are a senior financial editor summarizing news in simple English.")
+        summary = llm.summarize(prompt, system="You are a senior financial editor summarizing news in simple English. Provide a concise summary.")
 
     if not items:
         # If OpenAI web summary provided links embedded, we still return an empty items list; summary holds the value

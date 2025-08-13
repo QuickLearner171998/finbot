@@ -302,7 +302,7 @@ Inputs:
         return llm.reason(
             _truncate(user_prompt, 12000),
             system=sys_prompt,
-        response_format={"type": "json_object"},
+            response_format={"type": "json_object"}
         )
 
     sys_msg = (

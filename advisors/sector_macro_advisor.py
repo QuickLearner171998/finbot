@@ -11,7 +11,7 @@ def analyze_sector_macro(company_name: str) -> SectorMacroReport:
         "Mention policy/regulation if pertinent. Keep it short and practical.\n"
         f"Company: {company_name}"
     )
-    summary = llm.summarize(prompt, system="You are a macro analyst for Indian markets.")
+    summary = llm.summarize(prompt, system="You are a macro analyst for Indian markets. Provide a concise summary.")
     report = SectorMacroReport(summary=summary)
     logger.debug("Sector/Macro: summary_len=%d", len(summary or ""))
     return report
