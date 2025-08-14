@@ -36,7 +36,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    company = st.text_input("Company name(s) (comma-separated)", "Reliance Industries, TCS, HDFC Bank")
+    company = st.text_input("Company name(s) (comma-separated)", "HDFC Bank, ITC, Glenmark Pharma, Swiggy, Zomato")
     risk = st.selectbox("Risk level", ["low", "medium", "high"], index=1)
     horizon = st.slider("Horizon (years)", 1.0, 5.0, 2.0, 0.5)
     run = st.button("Analyze")
@@ -49,56 +49,42 @@ if run:
             graph = build_graph()
             state = {
                 "company_name": name,
-                "profile": schemas_mod.InputProfile(risk_level=risk, horizon_years=horizon),
+                "profile": {"risk_level": risk, "horizon_years": horizon},
                 "stream": True,
-                "committee_rounds": 1,
+                "committee_rounds": 0,
+                "run_dir": os.path.join("runs", f"streamlit_{name.replace(' ', '_')}")
             }
             
             # Create placeholders for each advisor section
             st.subheader(f"Analyzing {name}...")
             progress_bar = st.progress(0)
             
-            # Create section containers with loading indicators
-            ticker_section = st.container()
-            fundamentals_section = st.container()
-            technical_section = st.container()
-            news_section = st.container()
-            sector_macro_section = st.container()
-            sentiment_section = st.container()
-            research_section = st.container()
-            risk_section = st.container()
-            traders_section = st.container()
-            decision_section = st.container()
-            
-            with ticker_section:
-                st.markdown("<div class='advisor-section'><h3>Company Information</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-            
-            with fundamentals_section:
-                st.markdown("<div class='advisor-section'><h3>Fundamentals Analysis</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with technical_section:
-                st.markdown("<div class='advisor-section'><h3>Technical Analysis</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with news_section:
-                st.markdown("<div class='advisor-section'><h3>News Analysis</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with sector_macro_section:
-                st.markdown("<div class='advisor-section'><h3>Sector & Macro Analysis</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with sentiment_section:
-                st.markdown("<div class='advisor-section'><h3>Sentiment Analysis</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with research_section:
-                st.markdown("<div class='advisor-section'><h3>Research Debate</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with risk_section:
-                st.markdown("<div class='advisor-section'><h3>Risk Assessment</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with traders_section:
-                st.markdown("<div class='advisor-section'><h3>Trader Signals</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
-                
-            with decision_section:
-                st.markdown("<div class='advisor-section'><h3>Final Decision</h3><p class='loading'>Loading...</p></div>", unsafe_allow_html=True)
+            # Create section placeholders with loading indicators
+            def loading_box(title: str):
+                return f"<div class='advisor-section'><h3>{title}</h3><p class='loading'>Loading...</p></div>"
+
+            ticker_ph = st.empty()
+            fundamentals_ph = st.empty()
+            technical_ph = st.empty()
+            news_ph = st.empty()
+            sector_macro_ph = st.empty()
+            sentiment_ph = st.empty()
+            research_ph = st.empty()
+            risk_ph = st.empty()
+            traders_ph = st.empty()
+            decision_ph = st.empty()
+
+            # Initial placeholders
+            ticker_ph.markdown(loading_box("Company Information"), unsafe_allow_html=True)
+            fundamentals_ph.markdown(loading_box("Fundamentals Analysis"), unsafe_allow_html=True)
+            technical_ph.markdown(loading_box("Technical Analysis"), unsafe_allow_html=True)
+            news_ph.markdown(loading_box("News Analysis"), unsafe_allow_html=True)
+            sector_macro_ph.markdown(loading_box("Sector & Macro Analysis"), unsafe_allow_html=True)
+            sentiment_ph.markdown(loading_box("Sentiment Analysis"), unsafe_allow_html=True)
+            research_ph.markdown(loading_box("Research Debate"), unsafe_allow_html=True)
+            risk_ph.markdown(loading_box("Risk Assessment"), unsafe_allow_html=True)
+            traders_ph.markdown(loading_box("Trader Signals"), unsafe_allow_html=True)
+            decision_ph.markdown(loading_box("Final Decision"), unsafe_allow_html=True)
             
             # Define a callback function to update UI as results come in
             def on_update(state):
@@ -106,19 +92,18 @@ if run:
                 
                 # Update ticker info
                 if "ticker" in state:
+                    # Increment progress but skip UI – resolve output not needed
                     progress += 10
-                    with ticker_section:
+                    with ticker_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Company Information</h3></div>", unsafe_allow_html=True)
-                        st.markdown(f"**{state['ticker'].name} ({state['ticker'].yf_symbol})**")
-                        if state['ticker'].exchange:
-                            st.markdown(f"Exchange: {state['ticker'].exchange}")
                 
                 # Update fundamentals
                 if "fundamentals" in state:
                     progress += 10
-                    with fundamentals_section:
+                    f = state["fundamentals"]
+                    fundamentals_ph.empty()
+                    with fundamentals_ph.container():
                         st.markdown(f"<div class='advisor-section complete'><h3>Fundamentals Analysis</h3></div>", unsafe_allow_html=True)
-                        f = state["fundamentals"]
                         if f.metrics:
                             st.json(f.metrics)
                         st.markdown("**Pros**")
@@ -132,7 +117,7 @@ if run:
                 # Update technical analysis
                 if "technical" in state:
                     progress += 10
-                    with technical_section:
+                    with technical_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Technical Analysis</h3></div>", unsafe_allow_html=True)
                         t = state["technical"]
                         st.markdown(f"**Trend**: {t.trend}")
@@ -155,14 +140,14 @@ if run:
                                 fig.add_trace(go.Scatter(x=close.index, y=close.values, name="Close"))
                                 fig.add_trace(go.Scatter(x=ma50.index, y=ma50.values, name="MA50"))
                                 fig.add_trace(go.Scatter(x=ma200.index, y=ma200.values, name="MA200"))
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, use_container_width=True, key=f"tech_chart_{sym}_{time.time_ns()}")
                             else:
                                 st.info("No price history available.")
                 
                 # Update news
                 if "news" in state:
                     progress += 10
-                    with news_section:
+                    with news_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>News Analysis</h3></div>", unsafe_allow_html=True)
                         st.write(state["news"].summary)
                         if state["news"].items:
@@ -172,14 +157,14 @@ if run:
                 # Update sector/macro
                 if "sector_macro" in state:
                     progress += 10
-                    with sector_macro_section:
+                    with sector_macro_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Sector & Macro Analysis</h3></div>", unsafe_allow_html=True)
                         st.write(state["sector_macro"].summary)
                 
                 # Update sentiment
                 if "sentiment" in state:
                     progress += 10
-                    with sentiment_section:
+                    with sentiment_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Sentiment Analysis</h3></div>", unsafe_allow_html=True)
                         s = state["sentiment"]
                         st.markdown(f"**Score**: {s.score:.2f} (-1.0 to 1.0)")
@@ -191,7 +176,7 @@ if run:
                 # Update research debate
                 if "research" in state:
                     progress += 10
-                    with research_section:
+                    with research_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Research Debate</h3></div>", unsafe_allow_html=True)
                         r = state["research"]
                         col1, col2 = st.columns(2)
@@ -207,7 +192,7 @@ if run:
                 # Update risk assessment
                 if "risk" in state:
                     progress += 10
-                    with risk_section:
+                    with risk_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Risk Assessment</h3></div>", unsafe_allow_html=True)
                         r = state["risk"]
                         st.markdown(f"**Overall Risk**: {r.overall_risk.upper()}")
@@ -223,7 +208,7 @@ if run:
                 # Update trader signals
                 if "trader_signals" in state:
                     progress += 10
-                    with traders_section:
+                    with traders_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Trader Signals</h3></div>", unsafe_allow_html=True)
                         signals = state["trader_signals"]
                         for i, signal in enumerate(signals.signals):
@@ -246,11 +231,12 @@ if run:
                 # Update decision
                 if "decision" in state:
                     progress += 10
-                    with decision_section:
+                    with decision_ph:
                         st.markdown(f"<div class='advisor-section complete'><h3>Final Decision</h3></div>", unsafe_allow_html=True)
                         d = state["decision"]
                         st.markdown(f"**Decision**: {d.decision}")
-                        st.markdown(f"**Confidence**: {d.confidence:.2f if isinstance(d.confidence, float) else d.confidence}")
+                        confidence_str = f"{d.confidence:.2f}" if isinstance(d.confidence, float) else str(d.confidence)
+                        st.markdown(f"**Confidence**: {confidence_str}")
                         st.markdown(f"**Entry**: {d.entry_timing or 'Not specified'}")
                         st.markdown(f"**Position Size**: {d.position_size or 'Not specified'}")
                         if d.dca_plan:
@@ -371,7 +357,8 @@ if run:
                 """, unsafe_allow_html=True)
                 
                 # Key metrics in a clean format
-                st.markdown(f"**Confidence**: {d.confidence:.2f if isinstance(d.confidence, float) else d.confidence}")
+                confidence_str = f"{d.confidence:.2f}" if isinstance(d.confidence, float) else str(d.confidence)
+                st.markdown(f"**Confidence**: {confidence_str}")
                 st.markdown(f"**Entry Timing**: {d.entry_timing or 'Not specified'}")
                 st.markdown(f"**Position Size**: {d.position_size or 'Not specified'}")
                 
@@ -403,7 +390,7 @@ if run:
                     fig.add_trace(go.Scatter(x=ma50.index, y=ma50.values, name="MA50"))
                     fig.add_trace(go.Scatter(x=ma200.index, y=ma200.values, name="MA200"))
                     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"summary_chart_{sym}_{time.time_ns()}")
                 else:
                     st.info("No price history available.")
 
@@ -423,9 +410,10 @@ if run:
             run_dir = os.path.join("runs", f"streamlit_{name.replace(' ', '_')}")
             os.makedirs(run_dir, exist_ok=True)
             # Save a lightweight bundle
+            profile_obj = result["profile"]
             bundle = {
                 "input": result["ticker"].model_dump(),
-                "profile": result["profile"].model_dump(),
+                "profile": profile_obj.model_dump() if hasattr(profile_obj, "model_dump") else profile_obj,
                 "fundamentals": result["fundamentals"].model_dump(),
                 "technical": result["technical"].model_dump(),
                 "news": result["news"].model_dump(),

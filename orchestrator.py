@@ -51,7 +51,7 @@ logger = logging.getLogger("finbot.orchestrator")
 
 class GraphState(TypedDict, total=False):
     company_name: str
-    profile: InputProfile
+    profile: InputProfile | dict  # Support both shapes
     run_dir: str
     stream: bool
     committee_rounds: int
@@ -274,10 +274,20 @@ def node_traders(state: GraphState) -> GraphState:
     return {"traders": [s.model_dump() for s in signals], "traders_ensemble": ensemble}
 
 
+def _get_profile_value(profile: InputProfile | dict, key: str):
+    if isinstance(profile, dict):
+        return profile.get(key)
+    # pydantic model
+    try:
+        return getattr(profile, key)
+    except Exception:
+        return None
+
+
 def node_decide(state: GraphState) -> GraphState:
     start = time.perf_counter()
     ticker: TickerInfo = state["ticker"]
-    profile: InputProfile = state["profile"]
+    profile = state["profile"]
     fundamentals: FundamentalsReport = state["fundamentals"]
     technical: TechnicalReport = state["technical"]
     news: NewsReport = state["news"]
@@ -290,8 +300,8 @@ def node_decide(state: GraphState) -> GraphState:
     prompt = DECISION_PROMPT_TEMPLATE.format(
         company_name=ticker.name,
         symbol=ticker.yf_symbol,
-        risk_level=profile.risk_level,
-        horizon_years=profile.horizon_years,
+        risk_level=_get_profile_value(profile, "risk_level"),
+        horizon_years=_get_profile_value(profile, "horizon_years"),
         fundamentals=fundamentals.model_dump(),
         technical=technical.model_dump(),
         news_summary=news.summary,
@@ -304,10 +314,10 @@ def node_decide(state: GraphState) -> GraphState:
         json_schema=json.dumps(DECISION_JSON_SCHEMA)
     )
     logger.debug(
-        "Stage decide: building plan for %s risk=%s horizon=%.2f",
+        "Stage decide: building plan for %s risk=%s horizon=%s",
         ticker.yf_symbol,
-        profile.risk_level,
-        profile.horizon_years,
+        _get_profile_value(profile, "risk_level"),
+        _get_profile_value(profile, "horizon_years"),
     )
     # Safeguard extremely long inputs to the model
     def _truncate(text: str, max_len: int = 6000) -> str:
@@ -412,8 +422,8 @@ def node_decide(state: GraphState) -> GraphState:
         critique_prompt = CRITIQUE_PROMPT_TEMPLATE.format(
             company_name=ticker.name,
             symbol=ticker.yf_symbol,
-            risk_level=profile.risk_level,
-            horizon_years=profile.horizon_years,
+            risk_level=_get_profile_value(profile, "risk_level"),
+            horizon_years=_get_profile_value(profile, "horizon_years"),
             plan=plan.model_dump(),
             technical=technical.model_dump(),
             fundamentals=fundamentals.model_dump(),
@@ -432,8 +442,8 @@ def node_decide(state: GraphState) -> GraphState:
             critique_text=critique_text,
             company_name=ticker.name,
             symbol=ticker.yf_symbol,
-            risk_level=profile.risk_level,
-            horizon_years=profile.horizon_years,
+            risk_level=_get_profile_value(profile, "risk_level"),
+            horizon_years=_get_profile_value(profile, "horizon_years"),
             technical=technical.model_dump(),
             fundamentals=fundamentals.model_dump(),
             news_summary=news.summary[:1000],
@@ -575,7 +585,7 @@ def node_approve(state: GraphState) -> GraphState:
 
 def node_decide_with_feedback(
     ticker: TickerInfo,
-    profile: InputProfile,
+    profile: InputProfile | dict,  # Support both
     fundamentals: FundamentalsReport,
     technical: TechnicalReport,
     news: NewsReport,
@@ -658,8 +668,8 @@ def node_decide_with_feedback(
         adjustments=adjustments,
         company_name=ticker.name,
         symbol=ticker.yf_symbol,
-        risk_level=profile.risk_level,
-        horizon_years=profile.horizon_years,
+        risk_level=_get_profile_value(profile, "risk_level"),
+        horizon_years=_get_profile_value(profile, "horizon_years"),
         technical=technical.model_dump(),
         fundamentals=fundamentals.model_dump(),
         news_summary=news.summary[:1000],
@@ -759,8 +769,21 @@ def build_graph():
     
     # Conditional routing based on approval result
     def approval_router(state: GraphState):
+        # Safely inspect approval status irrespective of object/dict
+        approval = state.get("approval")
+        approved = False
+        if approval is not None:
+            try:
+                approved = bool(getattr(approval, "approved"))
+            except Exception:
+                try:
+                    approved = bool(approval.get("approved", False))
+                except Exception:
+                    approved = False
+
+        attempts = int(state.get("approval_attempts", 0) or 0)
         # If not approved and we haven't reached max attempts, loop back to risk assessment
-        if state.get("approval_attempts", 0) > 0 and state.get("approval_attempts", 0) < 2 and not state.get("approval", {}).get("approved", False):
+        if attempts > 0 and attempts < 2 and not approved:
             return "n_risk"
         # Otherwise proceed to end
         return END
@@ -847,7 +870,7 @@ def fill_missing_decision_fields(
     run_dir: str,
     plan: DecisionPlan,
     ticker: TickerInfo,
-    profile: InputProfile,
+    profile: InputProfile | dict,  # Support both
     fundamentals: FundamentalsReport,
     technical: TechnicalReport,
     news: NewsReport,
@@ -870,8 +893,8 @@ def fill_missing_decision_fields(
         missing_fields=before_missing,
         company_name=ticker.name,
         symbol=ticker.yf_symbol,
-        risk_level=profile.risk_level,
-        horizon_years=profile.horizon_years,
+        risk_level=_get_profile_value(profile, "risk_level"),
+        horizon_years=_get_profile_value(profile, "horizon_years"),
         technical=technical.model_dump(),
         fundamentals=fundamentals.model_dump(),
         news_summary=news.summary[:1000],

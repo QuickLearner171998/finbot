@@ -22,9 +22,11 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
     os.makedirs(run_dir, exist_ok=True)
 
     graph = build_graph()
+    # Accept profile as dict or InputProfile; orchestrator supports both
+    profile_obj = InputProfile(risk_level=risk_level, horizon_years=horizon_years)
     state = {
         "company_name": company_name,
-        "profile": InputProfile(risk_level=risk_level, horizon_years=horizon_years),
+        "profile": profile_obj,
         "run_dir": run_dir,
         "stream": stream,
         "committee_rounds": committee_rounds,
@@ -34,7 +36,7 @@ def run_once(company_name: str, risk_level: str, horizon_years: float, log_level
 
     bundle: ExtendedAnalysisBundle = ExtendedAnalysisBundle(
         input=result["ticker"],
-        profile=result["profile"],
+        profile=profile_obj,
         fundamentals=result["fundamentals"],
         technical=result["technical"],
         news=result["news"],
